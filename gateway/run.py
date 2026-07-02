@@ -17400,6 +17400,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     provider_data_collection=pr.get("data_collection"),
                     session_id=session_id,
                     platform=platform_key,
+                    profile=getattr(source, "profile", None) or None,
                     user_id=source.user_id,
                     user_id_alt=source.user_id_alt,
                     user_name=source.user_name,

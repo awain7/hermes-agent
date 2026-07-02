@@ -458,6 +458,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         timestamp_line += f"\nModel: {agent.model}"
     if agent.provider:
         timestamp_line += f"\nProvider: {agent.provider}"
+    # Multiplex gateway profile (e.g. "travel", "home") this prompt was built
+    # under. Lets conversation_loop._stored_prompt_matches_runtime() detect a
+    # stored system prompt from a different profile and force a rebuild
+    # instead of silently reusing another profile's identity (#multiplex
+    # session poisoning).
+    if getattr(agent, "profile", None):
+        timestamp_line += f"\nProfile: {agent.profile}"
     volatile_parts.append(timestamp_line)
 
     return {
