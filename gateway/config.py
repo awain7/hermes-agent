@@ -1311,6 +1311,21 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
 def _apply_env_overrides(config: GatewayConfig) -> None:
     """Apply environment variable overrides to config."""
 
+    def _scoped_env(name: str, default: Optional[str] = None) -> Optional[str]:
+        """Read env-style config through the active profile secret scope.
+
+        In gateway multiplexer mode, ``os.environ`` contains the default
+        profile's .env. Secondary profiles must read their own .env through
+        ``agent.secret_scope.get_secret`` or they all inherit the default bot
+        token and fight each other for the same Telegram getUpdates stream.
+        Outside multiplex mode this is identical to ``os.getenv``.
+        """
+        try:
+            from agent.secret_scope import get_secret
+            return get_secret(name, default)
+        except Exception:
+            return os.getenv(name, default)
+
     def _enable_from_env(platform: Platform) -> PlatformConfig:
         if platform not in config.platforms:
             config.platforms[platform] = PlatformConfig(enabled=True)
@@ -1329,7 +1344,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         return platform_config
     
     # Telegram
-    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    telegram_token = _scoped_env("TELEGRAM_BOT_TOKEN")
     if telegram_token:
         telegram_config = _enable_from_env(Platform.TELEGRAM)
         telegram_config.token = telegram_token
@@ -1349,7 +1364,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             ip.strip() for ip in telegram_fallback_ips.split(",") if ip.strip()
         ]
 
-    telegram_home = os.getenv("TELEGRAM_HOME_CHANNEL")
+    telegram_home = _scoped_env("TELEGRAM_HOME_CHANNEL")
     if telegram_home and Platform.TELEGRAM in config.platforms:
         config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
             platform=Platform.TELEGRAM,
