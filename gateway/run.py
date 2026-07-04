@@ -2216,11 +2216,29 @@ def _load_gateway_config() -> dict:
     still see their fixture) and shares the mtime-keyed raw-yaml cache
     from ``hermes_cli.config.read_raw_config`` when the paths match.
 
+    Multiplex: when a per-turn profile scope is active
+    (``_profile_runtime_scope`` → ``set_hermes_home_override``), read THAT
+    profile's config.yaml instead of the module-level default. Without this,
+    a secondary profile's turn resolved its model name from the default
+    profile's config while the provider/credentials resolved from its own
+    (``hermes_cli.config.load_config`` is scope-aware) — mixing e.g. the
+    default profile's ``gpt-5.5`` with the secondary profile's ``gemini``
+    provider into a request no provider can serve. Tests that monkeypatch
+    ``_hermes_home`` never set the override, so their fixtures still win.
+
     Managed scope is overlaid on the result (via the shared helper) so the
     gateway honors administrator-pinned values — neither read_raw_config nor a
     direct yaml.safe_load carries the managed merge on its own. Fail-open.
     """
-    config_path = _hermes_home / 'config.yaml'
+    _home = _hermes_home
+    try:
+        from hermes_constants import get_hermes_home_override
+        _scope_home = get_hermes_home_override()
+        if _scope_home:
+            _home = Path(_scope_home)
+    except Exception:
+        pass
+    config_path = _home / 'config.yaml'
     raw: dict = {}
     used_canonical = False
     try:
@@ -6988,7 +7006,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Build initial channel directory for send_message name resolution
         try:
             from gateway.channel_directory import build_channel_directory
-            directory = await build_channel_directory(self.adapters)
+            directory = await build_channel_directory(self.adapters, self._profile_adapters)
             ch_count = sum(len(chs) for chs in directory.get("platforms", {}).values())
             logger.info("Channel directory built: %d target(s)", ch_count)
         except Exception as e:
@@ -7646,7 +7664,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # Rebuild channel directory with the new adapter
                         try:
                             from gateway.channel_directory import build_channel_directory
-                            await build_channel_directory(self.adapters)
+                            await build_channel_directory(self.adapters, self._profile_adapters)
                         except Exception:
                             pass
 
@@ -19291,7 +19309,13 @@ def _run_planned_stop_watcher(
         stop_event.wait(poll_interval)
 
 
-def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+def _start_gateway_housekeeping(
+    stop_event: threading.Event,
+    adapters=None,
+    profile_adapters=None,
+    loop=None,
+    interval: int = 60,
+):
     """Background thread for gateway-only periodic chores (NOT cron).
 
     Split out of the historical ``_start_cron_ticker`` so the cron *trigger*
@@ -19327,7 +19351,7 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
                     # gateway event loop and wait briefly for completion so
                     # refresh failures are still logged via the except.
                     fut = safe_schedule_threadsafe(
-                        build_channel_directory(adapters), loop,
+                        build_channel_directory(adapters, profile_adapters), loop,
                         logger=logger,
                         log_message="Channel directory refresh scheduling error",
                     )
@@ -19856,7 +19880,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     cron_thread = threading.Thread(
         target=cron_provider.start,
         args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        kwargs={
+            "adapters": runner.adapters,
+            "loop": asyncio.get_running_loop(),
+        },
         daemon=True,
         name="cron-scheduler",
     )
@@ -19868,7 +19895,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping,
         args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        kwargs={
+            "adapters": runner.adapters,
+            "profile_adapters": getattr(runner, "_profile_adapters", None),
+            "loop": asyncio.get_running_loop(),
+        },
         daemon=True,
         name="gateway-housekeeping",
     )
