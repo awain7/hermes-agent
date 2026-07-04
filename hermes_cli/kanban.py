@@ -556,7 +556,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     p_block = sub.add_parser("block", help="Mark one or more tasks blocked")
     p_block.add_argument("task_id")
-    p_block.add_argument("reason", nargs="*", help="Reason (also appended as a comment)")
+    p_block.add_argument(
+        "--reason", default=None,
+        help="Reason (also appended as a comment). Quote multi-word reasons. "
+             "Named flag (not positional) — a bare positional reason can't "
+             "coexist with --kind/--ids in argparse without ordering "
+             "ambiguity; see 'unblock' for the same convention.",
+    )
     p_block.add_argument("--ids", nargs="+", default=None,
                          help="Additional task ids to block with the same reason (bulk mode)")
     p_block.add_argument(
@@ -572,7 +578,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     p_schedule = sub.add_parser("schedule", help="Park one or more tasks in Scheduled (waiting on time, not human input)")
     p_schedule.add_argument("task_id")
-    p_schedule.add_argument("reason", nargs="*", help="Reason/timing note (also appended as a comment)")
+    p_schedule.add_argument(
+        "--reason", default=None,
+        help="Reason/timing note (also appended as a comment). Quote "
+             "multi-word reasons. Named flag, same reasoning as 'block'.",
+    )
     p_schedule.add_argument("--ids", nargs="+", default=None,
                             help="Additional task ids to schedule with the same reason (bulk mode)")
 
@@ -1937,7 +1947,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 
 def _cmd_block(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
+    reason = args.reason.strip() if args.reason else None
     kind = getattr(args, "kind", None)
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
@@ -1974,7 +1984,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
+    reason = args.reason.strip() if args.reason else None
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
     failed: list[str] = []
