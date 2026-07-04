@@ -1264,6 +1264,28 @@ from hermes_constants import get_hermes_home
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
 
+
+def _scoped_hermes_home() -> Path:
+    """Return the HERMES_HOME for the *active* profile scope.
+
+    Multiplex: while a per-turn profile scope is active
+    (``_profile_runtime_scope`` → ``set_hermes_home_override``), per-profile
+    reads (config.yaml model/fallback/provider-routing lookups) must target
+    THAT profile's home, not the module-level default. Outside a scope this
+    returns ``_hermes_home`` unchanged, so tests that monkeypatch the module
+    global keep seeing their fixture. Do NOT use this for process-global
+    state (restart markers, update locks, logs) — those stay on
+    ``_hermes_home`` by design.
+    """
+    try:
+        from hermes_constants import get_hermes_home_override
+        override = get_hermes_home_override()
+        if override:
+            return Path(override)
+    except Exception:
+        pass
+    return _hermes_home
+
 # Load environment variables from ~/.hermes/.env first.
 # User-managed env files should override stale shell exports on restart.
 from dotenv import load_dotenv  # noqa: F401  # backward-compat for tests that monkeypatch this symbol
@@ -1848,11 +1870,15 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
 
 
 def _try_resolve_fallback_provider() -> dict | None:
-    """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
+    """Attempt to resolve credentials from the fallback_model/fallback_providers config.
+
+    Reads the active profile's config (``_scoped_hermes_home``) so a
+    secondary profile's fallback chain comes from its own config.yaml.
+    """
     from hermes_cli.runtime_provider import resolve_runtime_provider
     try:
         import yaml as _y
-        cfg_path = _hermes_home / "config.yaml"
+        cfg_path = _scoped_hermes_home() / "config.yaml"
         if not cfg_path.exists():
             return None
         with open(cfg_path, encoding="utf-8") as _f:
@@ -2230,15 +2256,7 @@ def _load_gateway_config() -> dict:
     gateway honors administrator-pinned values — neither read_raw_config nor a
     direct yaml.safe_load carries the managed merge on its own. Fail-open.
     """
-    _home = _hermes_home
-    try:
-        from hermes_constants import get_hermes_home_override
-        _scope_home = get_hermes_home_override()
-        if _scope_home:
-            _home = Path(_scope_home)
-    except Exception:
-        pass
-    config_path = _home / 'config.yaml'
+    config_path = _scoped_hermes_home() / 'config.yaml'
     raw: dict = {}
     used_canonical = False
     try:
@@ -4841,10 +4859,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     @staticmethod
     def _load_provider_routing() -> dict:
-        """Load OpenRouter provider routing preferences from config.yaml."""
+        """Load OpenRouter provider routing preferences from config.yaml.
+
+        Profile-scoped: reads the active profile's config (see
+        ``_scoped_hermes_home``).
+        """
         try:
             import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
+            cfg_path = _scoped_hermes_home() / "config.yaml"
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
@@ -4859,11 +4881,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         Returns the merged effective chain from ``fallback_providers`` plus any
         legacy ``fallback_model`` entries. ``fallback_providers`` stays first
-        when both keys are present.
+        when both keys are present. Profile-scoped: reads the active
+        profile's config (see ``_scoped_hermes_home``).
         """
         try:
             import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
+            cfg_path = _scoped_hermes_home() / "config.yaml"
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
@@ -5509,7 +5532,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             try:
                 platform = Platform(platform_str)
-                adapter = self.adapters.get(platform)
+                # Multiplex: deliver via the session's own profile bot, not
+                # the default profile's same-platform adapter.
+                if source is not None:
+                    adapter = self._adapter_for_source(source)
+                else:
+                    adapter = self.adapters.get(platform)
                 if not adapter:
                     continue
 
