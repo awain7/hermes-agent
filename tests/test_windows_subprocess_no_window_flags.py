@@ -211,7 +211,9 @@ def test_gateway_pid_scan_hides_wmic_and_powershell_windows(monkeypatch):
     ]
 
 
-def test_stale_dashboard_windows_scan_hides_wmic(monkeypatch):
+def test_stale_dashboard_windows_scan_hides_powershell(monkeypatch):
+    # Windows 11 removed wmic, so the scan shells out to PowerShell
+    # Get-CimInstance, which emits one "<pid>\t<commandline>" line per process.
     from hermes_cli import main
     from hermes_cli import _subprocess_compat
 
@@ -219,7 +221,7 @@ def test_stale_dashboard_windows_scan_hides_wmic(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         captured.append((cmd, kwargs))
-        return _Completed(stdout="CommandLine=hermes dashboard\nProcessId=123\n")
+        return _Completed(stdout="123\thermes dashboard\n")
 
     monkeypatch.setattr(main.sys, "platform", "win32")
     monkeypatch.setattr(_subprocess_compat, "IS_WINDOWS", True)
@@ -227,6 +229,7 @@ def test_stale_dashboard_windows_scan_hides_wmic(monkeypatch):
     monkeypatch.setattr(main.subprocess, "run", fake_run)
 
     assert main._find_stale_dashboard_pids() == [123]
+    assert captured[0][0][0] in {"powershell", "pwsh"}
     assert captured[0][1]["creationflags"] == _CREATE_NO_WINDOW
 
 
