@@ -5817,67 +5817,104 @@ def _find_stale_dashboard_pids(
 
     Returns an empty list on any scan error (missing ps/wmic, timeout, etc.).
     """
-    patterns = [
-        "hermes dashboard",
-        "hermes_cli.main dashboard",
-        "hermes_cli/main.py dashboard",
-        # The headless backend (`hermes serve`) is the same long-lived server
-        # under a different command name — the desktop app spawns it. Reap it
-        # on update for the same frontend/backend-mismatch reason.
-        "hermes serve",
-        "hermes_cli.main serve",
-        "hermes_cli/main.py serve",
-    ]
+    import re
+
+    # Match the long-lived dashboard/serve server across its launch forms:
+    #   "…\hermes.exe" dashboard            (console-script shim + its python children)
+    #   python -m hermes_cli.main dashboard (module form, e.g. the boot task)
+    #   …/hermes_cli/main.py dashboard      (source checkout)
+    # plus the equivalent `serve` (the headless desktop backend the app spawns;
+    # reaped on update for the same frontend/backend-mismatch reason). The match
+    # is anchored on a real hermes launcher token immediately followed by the
+    # subcommand, so a chat session merely *mentioning* "dashboard" never
+    # matches. This intentionally also catches the console-script form
+    # (`"…\hermes.exe" dashboard`) that the old plain-substring patterns missed
+    # — the reason `hermes dashboard --stop` never found a shim-launched server.
+    # Control invocations (`dashboard --stop/--status/--restart`) are excluded so
+    # e.g. `--stop`'s own shim ancestor isn't reaped as if it were the server.
+    server_re = re.compile(
+        r'(?:hermes(?:\.exe)?["\']?|hermes_cli[./]main(?:\.py)?)\s+(?:dashboard|serve)\b',
+        re.IGNORECASE,
+    )
+    control_re = re.compile(r'--(?:stop|status|restart)\b', re.IGNORECASE)
+    # The server is always run by a python/hermes executable. Requiring that of
+    # argv0 stops a *launcher shell* (e.g. `bash -c "hermes dashboard ..."`, whose
+    # own cmdline contains the matched string) from being reaped as if it were
+    # the server — which would kill the user's shell during `hermes update`.
+    server_exes = ("python", "pythonw", "hermes")
+
+    def _argv0_basename(cmd: str) -> str:
+        cmd = cmd.strip()
+        if cmd.startswith('"'):
+            end = cmd.find('"', 1)
+            arg0 = cmd[1:end] if end != -1 else cmd[1:]
+        else:
+            arg0 = cmd.split(None, 1)[0] if cmd else ""
+        return arg0.replace("\\", "/").rsplit("/", 1)[-1].strip("\"'").lower()
+
+    def _is_server_cmd(cmd: str) -> bool:
+        if not _argv0_basename(cmd).startswith(server_exes):
+            return False
+        return bool(server_re.search(cmd)) and not control_re.search(cmd)
+
     self_pid = os.getpid()
     dashboard_pids: list[int] = []
 
     try:
         if sys.platform == "win32":
-            # wmic may emit text in the system code page (for example cp936
-            # on zh-CN systems), not UTF-8. In text mode, subprocess output
-            # decoding depends on Python's configuration (locale-dependent
-            # by default, or UTF-8 in UTF-8 mode). The important protection
-            # here is errors="ignore": it prevents a reader-thread
-            # UnicodeDecodeError from leaving result.stdout=None and turning
-            # the later .split() into an AttributeError (#17049).
-            # CREATE_NO_WINDOW hides the conhost flash: this scan can run from
+            # Windows 11 has removed wmic.exe, so the historical
+            # `wmic process get ProcessId,CommandLine` scan raises
+            # FileNotFoundError here and this helper returns [] — every
+            # dashboard/serve reaper (`hermes update`, `dashboard --stop`,
+            # `dashboard --status`) then silently becomes a no-op. Query the
+            # same CIM/WMI process table via PowerShell's Get-CimInstance
+            # instead; it ships with every supported Windows.
+            #
+            # Output one "<pid>\t<commandline>" line per process. errors="ignore"
+            # guards against non-UTF-8 cmdline bytes leaving stdout=None and
+            # turning .split() into an AttributeError (#17049); forcing the
+            # child's OutputEncoding to UTF-8 keeps that decode lossless.
+            # CREATE_NO_WINDOW hides the console flash: this scan can run from
             # the windowless pythonw.exe desktop/gateway backend during an
-            # update, where a bare wmic spawn would pop a console window.
+            # update, where a bare spawn would pop a console window.
             from hermes_cli._subprocess_compat import windows_hide_flags
 
+            ps_script = (
+                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+                "Get-CimInstance Win32_Process | "
+                "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+            )
             result = subprocess.run(
-                ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
+                [
+                    "powershell", "-NoProfile", "-NonInteractive",
+                    "-Command", ps_script,
+                ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=15,
                 encoding="utf-8",
                 errors="ignore",
                 creationflags=windows_hide_flags(),
             )
             if result.returncode != 0 or result.stdout is None:
                 return []
-            current_cmd = ""
             for line in result.stdout.split("\n"):
-                line = line.strip()
-                if line.startswith("CommandLine="):
-                    current_cmd = line[len("CommandLine=") :]
-                elif line.startswith("ProcessId="):
-                    pid_str = line[len("ProcessId=") :]
-                    if (
-                        any(p in current_cmd for p in patterns)
-                        and int(pid_str) != self_pid
-                    ):
-                        try:
-                            dashboard_pids.append(int(pid_str))
-                        except ValueError:
-                            pass
+                pid_str, _, current_cmd = line.rstrip("\r").partition("\t")
+                if not current_cmd or not _is_server_cmd(current_cmd):
+                    continue
+                try:
+                    pid_val = int(pid_str.strip())
+                except ValueError:
+                    continue
+                if pid_val != self_pid:
+                    dashboard_pids.append(pid_val)
         else:
-            # Linux / macOS: scan the process table via ps and match against
-            # the same explicit patterns list used on Windows.  Using ps
-            # (rather than `pgrep -f "hermes.*dashboard"`) keeps us consistent
-            # with `hermes_cli.gateway._scan_gateway_pids` and avoids the
-            # greedy regex matching unrelated cmdlines that merely contain
-            # both words (e.g. a chat session discussing "dashboard").
+            # Linux / macOS: scan the process table via ps and match with the
+            # same _is_server_cmd() helper used on Windows.  Using ps (rather
+            # than `pgrep -f "hermes.*dashboard"`) keeps us consistent with
+            # `hermes_cli.gateway._scan_gateway_pids` and avoids a greedy regex
+            # matching unrelated cmdlines that merely contain both words
+            # (e.g. a chat session discussing "dashboard").
             result = subprocess.run(
                 ["ps", "-A", "-o", "pid=,command="],
                 capture_output=True,
@@ -5897,7 +5934,7 @@ def _find_stale_dashboard_pids(
                     except ValueError:
                         continue
                     command = parts[1]
-                    if any(p in command for p in patterns) and pid != self_pid:
+                    if _is_server_cmd(command) and pid != self_pid:
                         dashboard_pids.append(pid)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
