@@ -302,7 +302,15 @@ class TelegramAdapter(BasePlatformAdapter):
     # Threshold for detecting Telegram client-side message splits.
     # When a chunk is near this limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 4000
-    MEDIA_GROUP_WAIT_SECONDS = 0.8
+    # Album items are downloaded BEFORE they join the media-group buffer, so
+    # this debounce must cover the download time of the NEXT item, not just
+    # Telegram's update fan-out latency. At 0.8s a two-file album of full-size
+    # image documents routinely split (second download ~1.5s behind the first),
+    # so the first image started an agent run alone and the second landed on a
+    # busy session and was never analyzed. 3s absorbs realistic download times;
+    # the timer restarts on each arriving item, and single (non-album) media
+    # never enters this path so it costs nothing outside albums.
+    MEDIA_GROUP_WAIT_SECONDS = 3.0
     _GENERAL_TOPIC_THREAD_ID = "1"
 
     # Telegram's edit_message applies MarkdownV2 formatting only on the
