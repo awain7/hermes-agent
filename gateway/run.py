@@ -1260,31 +1260,26 @@ _ensure_ssl_certs()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_hermes_home_override
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
 
 
-def _scoped_hermes_home() -> Path:
-    """Return the HERMES_HOME for the *active* profile scope.
+def _gateway_config_home() -> Path:
+    """Return the Hermes home that gateway config reads should use.
 
     Multiplex: while a per-turn profile scope is active
-    (``_profile_runtime_scope`` → ``set_hermes_home_override``), per-profile
-    reads (config.yaml model/fallback/provider-routing lookups) must target
-    THAT profile's home, not the module-level default. Outside a scope this
-    returns ``_hermes_home`` unchanged, so tests that monkeypatch the module
-    global keep seeing their fixture. Do NOT use this for process-global
-    state (restart markers, update locks, logs) — those stay on
-    ``_hermes_home`` by design.
+    (``_profile_runtime_scope`` -> ``set_hermes_home_override``), per-profile
+    reads must target THAT profile's home. Outside a scope this returns
+    ``_hermes_home`` unchanged, so tests that monkeypatch the module global
+    keep seeing their fixture.
     """
-    try:
-        from hermes_constants import get_hermes_home_override
-        override = get_hermes_home_override()
-        if override:
-            return Path(override)
-    except Exception:
-        pass
+    override = get_hermes_home_override()
+    if override:
+        return Path(override)
     return _hermes_home
+
+
 
 # Load environment variables from ~/.hermes/.env first.
 # User-managed env files should override stale shell exports on restart.
@@ -1872,13 +1867,13 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
 def _try_resolve_fallback_provider() -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config.
 
-    Reads the active profile's config (``_scoped_hermes_home``) so a
+    Reads the active profile's config (``_gateway_config_home``) so a
     secondary profile's fallback chain comes from its own config.yaml.
     """
     from hermes_cli.runtime_provider import resolve_runtime_provider
     try:
         import yaml as _y
-        cfg_path = _scoped_hermes_home() / "config.yaml"
+        cfg_path = _gateway_config_home() / "config.yaml"
         if not cfg_path.exists():
             return None
         with open(cfg_path, encoding="utf-8") as _f:
@@ -2256,7 +2251,7 @@ def _load_gateway_config() -> dict:
     gateway honors administrator-pinned values — neither read_raw_config nor a
     direct yaml.safe_load carries the managed merge on its own. Fail-open.
     """
-    config_path = _scoped_hermes_home() / 'config.yaml'
+    config_path = _gateway_config_home() / 'config.yaml'
     raw: dict = {}
     used_canonical = False
     try:
@@ -2750,6 +2745,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._busy_input_mode = self._load_busy_input_mode()
         self._busy_text_mode = self._load_busy_text_mode()
         self._restart_drain_timeout = self._load_restart_drain_timeout()
+        # __init__ runs before any per-turn profile scope exists, so these two
+        # snapshots always reflect the DEFAULT profile. Per-turn consumers go
+        # through _resolve_provider_routing() / _refresh_fallback_model(),
+        # which re-resolve against the active profile scope.
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
 
@@ -4862,11 +4861,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Load OpenRouter provider routing preferences from config.yaml.
 
         Profile-scoped: reads the active profile's config (see
-        ``_scoped_hermes_home``).
+        ``_gateway_config_home``).
         """
         try:
             import yaml as _y
-            cfg_path = _scoped_hermes_home() / "config.yaml"
+            cfg_path = _gateway_config_home() / "config.yaml"
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
@@ -4875,6 +4874,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             pass
         return {}
 
+    def _resolve_provider_routing(self) -> dict:
+        """Provider routing for the ACTIVE profile scope.
+
+        ``self._provider_routing`` is resolved once in ``__init__`` — before
+        any per-turn profile scope exists — so it can only ever reflect the
+        default profile's config. During a secondary multiplex profile's turn
+        (``_profile_runtime_scope`` active), read and cache that profile's own
+        ``provider_routing`` instead. Caching per profile home mirrors the
+        init-time snapshot semantics the default profile already has.
+        """
+        home = _gateway_config_home()
+        if home == _hermes_home:
+            return self._provider_routing
+        cache = getattr(self, "_provider_routing_by_home", None)
+        if cache is None:
+            cache = self._provider_routing_by_home = {}
+        if home not in cache:
+            cache[home] = self._load_provider_routing()
+        return cache[home]
+
     @staticmethod
     def _load_fallback_model() -> list | None:
         """Load fallback provider chain from config.yaml.
@@ -4882,11 +4901,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Returns the merged effective chain from ``fallback_providers`` plus any
         legacy ``fallback_model`` entries. ``fallback_providers`` stays first
         when both keys are present. Profile-scoped: reads the active
-        profile's config (see ``_scoped_hermes_home``).
+        profile's config (see ``_gateway_config_home``).
         """
         try:
             import yaml as _y
-            cfg_path = _scoped_hermes_home() / "config.yaml"
+            cfg_path = _gateway_config_home() / "config.yaml"
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
@@ -4896,6 +4915,97 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             pass
         return None
+
+    def _refresh_fallback_model(self) -> list | None:
+        """Re-read fallback_providers from disk for the next agent create/reuse.
+
+        Cron already does this per job via ``get_fallback_chain``; the gateway
+        previously froze ``self._fallback_model`` at process start, so a chain
+        configured (or changed) after ``hermes gateway`` was running never
+        reached messaging sessions even though the same process's cron jobs
+        fell back correctly. Fixes #60955.
+
+        A TRANSIENT read/parse failure (user mid-edit of config.yaml with a
+        non-atomic write) keeps the last known-good chain instead of wiping a
+        cached agent's working fallback for that turn.  Only a successful read
+        that genuinely lacks the key clears the chain.
+
+        Profile-scoped: reads the ACTIVE profile's config
+        (``_gateway_config_home``), so a secondary multiplex profile's turn
+        refreshes that profile's own chain. The last-known-good cache is kept
+        per profile home — a single shared slot would let one profile's chain
+        leak into another's turn on a transient read failure.
+        ``self._fallback_model`` stays the default profile's slot (tests and
+        the init-time snapshot use it), so single-profile behavior and the
+        #60955 semantics are unchanged.
+        """
+        home = _gateway_config_home()
+        is_default_home = home == _hermes_home
+        cache = getattr(self, "_fallback_model_by_home", None)
+        if cache is None:
+            cache = self._fallback_model_by_home = {}
+
+        def _remember(chain: list | None) -> list | None:
+            if is_default_home:
+                self._fallback_model = chain
+            else:
+                cache[home] = chain
+            return chain
+
+        def _last_known_good() -> list | None:
+            return self._fallback_model if is_default_home else cache.get(home)
+
+        try:
+            import yaml as _y
+            cfg_path = home / "config.yaml"
+            if not cfg_path.exists():
+                return _remember(None)
+            with open(cfg_path, encoding="utf-8") as _f:
+                cfg = _y.safe_load(_f) or {}
+        except Exception:
+            # Transient failure — keep last known-good chain.
+            logger.debug(
+                "fallback_providers refresh: config.yaml read failed; "
+                "keeping last known-good chain", exc_info=True,
+            )
+            return _last_known_good()
+        return _remember(get_fallback_chain(cfg) or None)
+
+    @staticmethod
+    def _apply_fallback_chain_to_agent(agent: Any, chain: list | None) -> None:
+        """Keep a cached agent's fallback chain aligned with current config.
+
+        Skips rewrite while a cooldown is holding the agent on an already-
+        activated fallback provider — ``restore_primary_runtime`` owns that
+        turn-scoped lifecycle. When primary is active (or cooldown expired),
+        replace the chain so mid-uptime ``fallback_providers`` edits take
+        effect without requiring a gateway restart (#60955).
+        """
+        if agent is None:
+            return
+        new_chain = list(chain or [])
+        rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
+        if (
+            getattr(agent, "_fallback_activated", False)
+            and rate_limited_until > time.monotonic()
+        ):
+            return
+        old_chain = list(getattr(agent, "_fallback_chain", []) or [])
+        agent._fallback_chain = new_chain
+        agent._fallback_model = new_chain[0] if new_chain else None
+        if not getattr(agent, "_fallback_activated", False):
+            agent._fallback_index = 0
+        # A config edit signals the user changed something — drop the
+        # session-scoped unavailability memo so re-configured entries
+        # (e.g. credentials added mid-uptime for a previously-failing
+        # provider) get retried instead of staying suppressed for the
+        # cached agent's lifetime.  Only on actual content change, so
+        # the per-message no-op refresh keeps the memo's rate-limiting
+        # benefit (#60955).
+        if new_chain != old_chain:
+            unavailable = getattr(agent, "_unavailable_fallback_keys", None)
+            if unavailable:
+                unavailable.clear()
 
     def _snapshot_running_agents(self) -> Dict[str, Any]:
         return {
@@ -12838,7 +12948,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
-            pr = self._provider_routing
+            pr = self._resolve_provider_routing()
             max_iterations = _current_max_iterations()
             reasoning_config = self._resolve_session_reasoning_config(source=source)
             self._reasoning_config = reasoning_config
@@ -17178,7 +17288,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "tools": [],
                 }
 
-            pr = self._provider_routing
+            pr = self._resolve_provider_routing()
             reasoning_config = self._resolve_session_reasoning_config(
                 source=source,
                 session_key=session_key,
