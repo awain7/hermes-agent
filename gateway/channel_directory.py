@@ -9,6 +9,7 @@ action="list" and for resolving human-friendly channel names to numeric IDs.
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
@@ -305,12 +306,83 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
 def _build_from_sessions(
     platform_name: str, home_override: Optional[Any] = None
 ) -> List[Dict[str, str]]:
-    """Pull known channels/contacts from sessions.json origin data.
+    """Pull known channels/contacts from gateway session origin data.
 
-    ``home_override`` reads a secondary multiplex profile's own sessions.json
-    instead of the default profile's (``get_hermes_home()``).
+    state.db is the primary source (#9006): gateway session rows persist
+    origin_json.  Falls back to sessions.json for pre-migration databases.
+
+    ``home_override`` reads a secondary multiplex profile's own HERMES_HOME
+    (its state.db / sessions.json) instead of the default profile's.
     """
-    home = home_override if home_override is not None else get_hermes_home()
+    entries = _build_from_sessions_db(platform_name, home_override=home_override)
+    if entries:
+        return entries
+    return _build_from_sessions_json(platform_name, home_override=home_override)
+
+
+def _build_from_sessions_db(
+    platform_name: str, home_override: Optional[Any] = None
+) -> List[Dict[str, str]]:
+    """Pull channels/contacts from state.db gateway session rows."""
+    entries: List[Dict[str, str]] = []
+    try:
+        from hermes_state import SessionDB
+        if home_override is not None:
+            # Read-only attach: never contends with the owning profile's
+            # gateway writer, and skips schema init on a DB we don't own.
+            db_path = Path(home_override) / "state.db"
+            if not db_path.exists():
+                return []
+            db = SessionDB(db_path=db_path, read_only=True)
+        else:
+            db = SessionDB()
+        try:
+            lister = getattr(db, "list_gateway_sessions", None)
+            if not callable(lister):
+                return []
+            rows = lister(platform=platform_name, active_only=False)
+        finally:
+            db.close()
+
+        seen_ids = set()
+        for row in rows:
+            origin: Dict[str, Any] = {}
+            if row.get("origin_json"):
+                try:
+                    parsed = json.loads(row["origin_json"])
+                    if isinstance(parsed, dict):
+                        origin = parsed
+                except (TypeError, ValueError):
+                    pass
+            if not origin:
+                origin = {
+                    "chat_id": row.get("chat_id"),
+                    "thread_id": row.get("thread_id"),
+                    "chat_name": row.get("display_name"),
+                }
+            entry_id = _session_entry_id(origin)
+            if not entry_id or entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            entries.append({
+                "id": entry_id,
+                "name": _session_entry_name(origin),
+                "type": row.get("chat_type") or "dm",
+                "thread_id": origin.get("thread_id"),
+            })
+    except Exception as e:
+        logger.debug(
+            "Channel directory: state.db session read failed for %s: %s",
+            platform_name, e,
+        )
+    return entries
+
+
+def _build_from_sessions_json(
+    platform_name: str, home_override: Optional[Any] = None
+) -> List[Dict[str, str]]:
+    """Legacy fallback: pull channels/contacts from sessions.json origin data."""
+    home = Path(home_override) if home_override is not None else get_hermes_home()
     sessions_path = home / "sessions" / "sessions.json"
     if not sessions_path.exists():
         return []

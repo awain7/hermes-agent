@@ -427,8 +427,11 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # because the line happens to be absent — that's exactly the "wrong
     # profile's identity baked into the cached prompt" bug this guards
     # against. Single-profile gateways never set agent.profile, so this is a
-    # no-op for them (current_profile is always empty).
-    current_profile = str(getattr(agent, "profile", "") or "").strip()
+    # no-op for them (current_profile is always empty). Only a real string
+    # counts: agent.profile is str-or-None by contract (agent_init), and test
+    # fakes built from MagicMock must not see a truthy auto-attribute here.
+    _profile_attr = getattr(agent, "profile", None)
+    current_profile = _profile_attr.strip() if isinstance(_profile_attr, str) else ""
     if current_profile:
         stored_profile = line_value("Profile")
         if stored_profile != current_profile:

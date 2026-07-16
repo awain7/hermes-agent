@@ -36,6 +36,24 @@ def _current_session_profile() -> str:
         profile = ""
     return profile or os.environ.get("HERMES_PROFILE", "")
 
+
+def _resolve_runner_adapter(runner, platform):
+    """Profile-aware adapter lookup on the live gateway runner.
+
+    Uses the runner's ``_authorization_adapter`` (multiplex profile-aware)
+    when present; duck-typed runner stands-ins that only carry an
+    ``adapters`` map (tests, embedded frontends) fall back to a plain
+    platform lookup, preserving pre-multiplex behavior.
+    """
+    if runner is None:
+        return None
+    resolver = getattr(runner, "_authorization_adapter", None)
+    if callable(resolver):
+        return resolver(platform, _current_session_profile())
+    adapters = getattr(runner, "adapters", None)
+    return adapters.get(platform) if adapters else None
+
+
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 # Slack conversation IDs: C (public channel), G (private/group channel), D (DM).
@@ -283,9 +301,7 @@ def _handle_react(args, remove=False):
         runner = _gateway_runner_ref()
     except Exception:
         runner = None
-    adapter = None
-    if runner is not None:
-        adapter = runner._authorization_adapter(platform, _current_session_profile())
+    adapter = _resolve_runner_adapter(runner, platform)
     if adapter is None:
         return tool_error(
             f"Reactions require a live {platform_name} adapter in the running "
@@ -676,7 +692,7 @@ async def _send_via_adapter(
 
     if runner is not None:
         try:
-            adapter = runner._authorization_adapter(platform, _current_session_profile())
+            adapter = _resolve_runner_adapter(runner, platform)
         except Exception:
             adapter = None
         if adapter is not None:
@@ -1532,7 +1548,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     if runner is not None:
         try:
             from gateway.config import Platform
-            live_adapter = runner._authorization_adapter(Platform.MATRIX, _current_session_profile())
+            live_adapter = _resolve_runner_adapter(runner, Platform.MATRIX)
         except Exception:
             logger.warning(
                 "Matrix: live gateway adapter lookup failed; falling back to an "

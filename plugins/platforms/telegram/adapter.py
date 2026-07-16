@@ -2298,7 +2298,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     error_callback=self._polling_error_callback_ref,
                 )
                 logger.info(
-                    "[%s] Telegram polling resumed after conflict retry %d/%d",
+                    "[%s] Telegram polling restarted after conflict retry %d/%d; "
+                    "health pending getUpdates progress",
                     self._diagnostic_label(), self._polling_conflict_count, MAX_CONFLICT_RETRIES,
                 )
                 self._polling_conflict_count = 0  # reset counter on success
@@ -2307,7 +2308,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning(
                     "[%s] Telegram polling retry %d/%d failed: %s. "
                     "Scheduling next attempt.",
-                    self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
+                    self._diagnostic_label(), self._polling_conflict_count, MAX_CONFLICT_RETRIES,
                     retry_err,
                 )
                 # Schedule the next retry rather than returning silently.
