@@ -200,6 +200,58 @@ class TestKeepTypingTimeoutPerTick:
         )
 
     @pytest.mark.asyncio
+    async def test_lifetime_cap_stops_leaked_loop(self, monkeypatch):
+        """A refresh loop whose owner never cancels it must stop itself once
+        the HERMES_TYPING_MAX_SECONDS lifetime cap elapses.  Regression guard
+        for the leaked-typing-task incident (indicator shown for an hour on
+        an idle gateway): Telegram has no stop-typing API, so a leaked loop
+        is user-visible until the process restarts unless it self-bounds."""
+        adapter = _StubAdapter()
+        calls = []
+
+        async def recording_send_typing(chat_id, metadata=None):
+            calls.append(chat_id)
+
+        monkeypatch.setattr(adapter, "send_typing", recording_send_typing)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+        monkeypatch.setenv("HERMES_TYPING_MAX_SECONDS", "1")
+
+        # No stop_event and no cancel — simulates a leaked/orphaned task.
+        task = asyncio.create_task(
+            adapter._keep_typing(chat_id="leaked", interval=0.2)
+        )
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            pytest.fail(
+                "_keep_typing did not stop itself after the lifetime cap — "
+                "a leaked task would show 'typing…' until process restart"
+            )
+        assert calls, "loop should have refreshed at least once before the cap"
+
+    @pytest.mark.asyncio
+    async def test_lifetime_cap_zero_disables(self, monkeypatch):
+        """HERMES_TYPING_MAX_SECONDS=0 must disable the cap (legacy behavior)."""
+        adapter = _StubAdapter()
+
+        async def noop_send_typing(chat_id, metadata=None):
+            pass
+
+        monkeypatch.setattr(adapter, "send_typing", noop_send_typing)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+        monkeypatch.setenv("HERMES_TYPING_MAX_SECONDS", "0")
+
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            adapter._keep_typing(chat_id="x", interval=0.1, stop_event=stop_event)
+        )
+        await asyncio.sleep(0.5)
+        assert not task.done(), "cap=0 must not stop the loop"
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    @pytest.mark.asyncio
     async def test_stop_typing_refresh_blocks_late_cancel_tick(self, monkeypatch):
         """Final cleanup must not let a cancelled refresh loop send typing again."""
         adapter = _StubAdapter()

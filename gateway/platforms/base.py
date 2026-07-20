@@ -3810,9 +3810,27 @@ class BasePlatformAdapter(ABC):
         # gated on network health.  Must stay below ``interval`` so a slow
         # call gets abandoned before the next scheduled tick.
         _send_typing_timeout = max(0.25, min(1.5, interval - 0.25))
+        # Hard lifetime cap: a leaked refresh task (owner crashed/was GC'd
+        # without cancelling it) would otherwise show "typing…" forever —
+        # platforms like Telegram expose no stop-typing API, so the only
+        # containment is the loop bounding itself.  0 disables the cap.
+        try:
+            _max_lifetime = float(os.getenv("HERMES_TYPING_MAX_SECONDS", "900"))
+        except (TypeError, ValueError):
+            _max_lifetime = 900.0
+        _started_at = time.monotonic()
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
+                    return
+                if _max_lifetime > 0 and time.monotonic() - _started_at > _max_lifetime:
+                    logger.warning(
+                        "[%s] _keep_typing exceeded %.0fs lifetime cap for chat %s — "
+                        "stopping refresh loop. This usually means the owning task "
+                        "leaked without cancelling it (set HERMES_TYPING_MAX_SECONDS "
+                        "to tune, 0 to disable).",
+                        self.name, _max_lifetime, chat_id,
+                    )
                     return
                 if chat_id not in self._typing_paused:
                     try:
