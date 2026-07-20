@@ -155,7 +155,7 @@ def test_run_slash_block_unblock_cycle(kanban_home):
     tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
     # Claim first so block() finds it running
     kc.run_slash(f"claim {tid}")
-    assert "Blocked" in kc.run_slash(f"block {tid} 'need decision'")
+    assert "Blocked" in kc.run_slash(f"block {tid} --reason 'need decision'")
     assert "Unblocked" in kc.run_slash(f"unblock {tid}")
 
 
