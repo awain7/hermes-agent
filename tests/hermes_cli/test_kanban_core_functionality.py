@@ -823,7 +823,7 @@ def test_cli_block_bulk_via_ids_flag(kanban_home):
         b = kb.create_task(conn, title="b")
     finally:
         conn.close()
-    out = run_slash(f"block {a} need input --ids {b}")
+    out = run_slash(f"block {a} --reason 'need input' --ids {b}")
     assert out.count("Blocked") == 2
 
 
@@ -915,7 +915,7 @@ def test_run_slash_every_verb_returns_sensible_output(kanban_home):
         f"claim {tid_a}",
         f"comment {tid_a} hello",
         f"complete {tid_a}",
-        f"block {tid_b} need input",
+        f"block {tid_b} --reason 'need input'",
         f"unblock {tid_b}",
         f"archive {tid_a}",
         "dispatch --dry-run --json",
