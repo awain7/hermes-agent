@@ -28,16 +28,22 @@ try:
         LinkPreviewOptions = None
     from telegram.ext import (
         Application,
-        ApplicationHandlerStop,
         CommandHandler,
         CallbackQueryHandler,
         MessageHandler as TelegramMessageHandler,
         ContextTypes,
-        TypeHandler,
         filters,
     )
     from telegram.constants import ParseMode, ChatType
     from telegram.request import HTTPXRequest
+    # Imported separately so their absence (minimal test stubs that register
+    # a bare ModuleType as telegram.ext) degrades to "no stale-update guard"
+    # instead of knocking out the whole telegram integration.
+    try:
+        from telegram.ext import ApplicationHandlerStop, TypeHandler
+    except ImportError:
+        ApplicationHandlerStop = Exception
+        TypeHandler = None
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
@@ -52,7 +58,7 @@ except ImportError:
     CommandHandler = Any
     CallbackQueryHandler = Any
     TelegramMessageHandler = Any
-    TypeHandler = Any
+    TypeHandler = None
     HTTPXRequest = Any
     filters = None
     ParseMode = None
@@ -146,9 +152,17 @@ def check_telegram_requirements() -> bool:
             CallbackQueryHandler as _CQH,
             MessageHandler as _MH,
             ContextTypes as _CT, filters as _filters,
-            TypeHandler as _TH,
-            ApplicationHandlerStop as _AHS,
         )
+        # Optional, same rationale as the module-top import: a stub
+        # telegram.ext without these must not fail the whole ensure.
+        try:
+            from telegram.ext import (
+                TypeHandler as _TH,
+                ApplicationHandlerStop as _AHS,
+            )
+        except ImportError:
+            _TH = None
+            _AHS = Exception
         from telegram.constants import ParseMode as _PM, ChatType as _CtT
         from telegram.request import HTTPXRequest as _HR
     except ImportError:
@@ -2971,9 +2985,12 @@ class TelegramAdapter(BasePlatformAdapter):
             # restarts (drop_pending_updates=False), and this guard bounds the
             # replay window by dropping messages older than the cutoff. Fresh
             # messages and non-message updates (callbacks, edits) pass through.
-            self._app.add_handler(
-                TypeHandler(Update, self._drop_stale_pending_update), group=-1
-            )
+            # TypeHandler is None only under stub telegram.ext modules that
+            # lack it (and on ancient PTB) — skip the guard there.
+            if TypeHandler is not None:
+                self._app.add_handler(
+                    TypeHandler(Update, self._drop_stale_pending_update), group=-1
+                )
             
             # Start polling — retry initialize() for transient TLS resets.
             # Each attempt is capped by _init_timeout so a single unreachable

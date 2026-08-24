@@ -16,7 +16,13 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import PlatformConfig
-from plugins.platforms.telegram.adapter import TelegramAdapter
+
+# NOTE: the adapter module is deliberately NOT imported at module level.
+# Several sibling test files (e.g. test_telegram_thread_fallback.py) inject
+# their own fake telegram module tree via an autouse fixture and rely on the
+# adapter binding to it on first import; a collection-time import here would
+# freeze the adapter's telegram bindings before those fixtures run and
+# poison whichever of them shares this xdist worker.
 
 
 class _HandlerStop(Exception):
@@ -36,7 +42,9 @@ def _real_handler_stop(monkeypatch):
     )
 
 
-def _make_adapter() -> TelegramAdapter:
+def _make_adapter():
+    from plugins.platforms.telegram.adapter import TelegramAdapter
+
     return TelegramAdapter(PlatformConfig(enabled=True, token="test-token"))
 
 
