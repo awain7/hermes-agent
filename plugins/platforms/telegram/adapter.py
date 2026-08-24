@@ -8,6 +8,7 @@ Uses python-telegram-bot library for:
 """
 
 import asyncio
+import time
 import dataclasses
 import inspect
 import json
@@ -465,6 +466,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self._polling_network_error_count: int = 0
         self._polling_error_callback_ref = None
         self._polling_heartbeat_task: Optional[asyncio.Task] = None
+        # monotonic timestamps of recent heartbeat resurrections, for the
+        # rate limit in _on_heartbeat_task_done.
+        self._heartbeat_restart_times: list = []
         # Consecutive heartbeat probes that saw queued updates the running
         # poller is not consuming. get_me() can't see this — the send path is
         # healthy while the getUpdates consumer is wedged — so the heartbeat
@@ -1995,6 +1999,65 @@ class TelegramAdapter(BasePlatformAdapter):
                 # second, concurrent recovery for the same outage.
                 self._polling_error_task = task
 
+    # The heartbeat loop is the watchdog for the polling connection — but a
+    # watchdog nobody watches is a single point of failure: if the task dies
+    # from an unexpected exception (or exits via a defensive return while the
+    # adapter is still live), every wedge thereafter goes undetected and the
+    # bot silently stops receiving messages until a manual restart. Observed
+    # 2026-08-24 ~17:00: 75 minutes of total log silence on a wedged profile,
+    # zero heartbeat warnings. These two helpers make the heartbeat
+    # self-resurrecting, with a rate limit so a hard-crashing loop cannot spin.
+    _HEARTBEAT_RESTART_WINDOW_S = 300.0
+    _HEARTBEAT_RESTART_LIMIT = 3
+
+    def _arm_polling_heartbeat(self) -> None:
+        """(Re)start the polling heartbeat task and watch it for death."""
+        if self._polling_heartbeat_task and not self._polling_heartbeat_task.done():
+            self._polling_heartbeat_task.cancel()
+        task = asyncio.ensure_future(self._polling_heartbeat_loop())
+        self._polling_heartbeat_task = task
+        task.add_done_callback(self._on_heartbeat_task_done)
+
+    def _on_heartbeat_task_done(self, task: "asyncio.Task") -> None:
+        """Resurrect the heartbeat if it died while the adapter is still live.
+
+        Deliberate exits stay final: cancellation (disconnect/reconnect paths
+        cancel the task before replacing or dropping it) and exits while the
+        adapter has a fatal error or is no longer connected. Anything else —
+        an unexpected exception, or a defensive ``return`` inside the loop
+        while polling is still supposed to be running — gets logged loudly
+        and the loop is re-armed, rate-limited to
+        ``_HEARTBEAT_RESTART_LIMIT`` restarts per
+        ``_HEARTBEAT_RESTART_WINDOW_S`` so a hard-crashing loop cannot spin.
+        """
+        if task.cancelled():
+            return
+        if self._webhook_mode or self.has_fatal_error or not self.is_connected:
+            return
+        exc = task.exception()
+        now = time.monotonic()
+        times = [
+            t for t in getattr(self, "_heartbeat_restart_times", [])
+            if now - t < self._HEARTBEAT_RESTART_WINDOW_S
+        ]
+        if len(times) >= self._HEARTBEAT_RESTART_LIMIT:
+            logger.error(
+                "[%s] Polling heartbeat loop died %d times within %.0fs "
+                "(last error: %s); giving up on in-process resurrection — "
+                "an external watchdog must cover wedge detection now",
+                self.name, len(times), self._HEARTBEAT_RESTART_WINDOW_S, exc,
+            )
+            return
+        times.append(now)
+        self._heartbeat_restart_times = times
+        logger.warning(
+            "[%s] Polling heartbeat loop exited unexpectedly (%s); "
+            "restarting it (%d/%d in window)",
+            self.name, exc if exc else "clean return while still polling",
+            len(times), self._HEARTBEAT_RESTART_LIMIT,
+        )
+        self._arm_polling_heartbeat()
+
     async def _polling_heartbeat_loop(self) -> None:
         """Detect dead Telegram TCP sockets (CLOSE-WAIT) by periodic probing.
 
@@ -2024,6 +2087,11 @@ class TelegramAdapter(BasePlatformAdapter):
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 if self.has_fatal_error:
+                    logger.info(
+                        "[%s] Polling heartbeat exiting: adapter has a fatal "
+                        "error (reconnect queue owns recovery now)",
+                        self.name,
+                    )
                     return
                 bot = self._app.bot if self._app else None
                 if bot is None:
@@ -2031,7 +2099,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 # A real PTB Bot always exposes get_me(); if it's absent the
                 # app isn't a live polling client (e.g. torn down or a test
                 # double), so there is nothing to probe — exit rather than spin.
+                # Log it: if this fires in production the polling watchdog is
+                # about to go dark, and that must never happen silently again
+                # (the resurrection callback will bring the loop back if the
+                # adapter still believes it is connected).
                 if not callable(getattr(bot, "get_me", None)):
+                    logger.warning(
+                        "[%s] Polling heartbeat exiting: bot object has no "
+                        "callable get_me (app torn down?)",
+                        self.name,
+                    )
                     return
                 await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
                 # get_me() succeeded — the general/send request path is healthy.
@@ -3152,11 +3229,8 @@ class TelegramAdapter(BasePlatformAdapter):
             # receives updates via incoming pushes — there is no long-poll
             # socket to wedge in CLOSE-WAIT, so the loop is not needed there.
             if not self._webhook_mode:
-                if self._polling_heartbeat_task and not self._polling_heartbeat_task.done():
-                    self._polling_heartbeat_task.cancel()
-                self._polling_heartbeat_task = asyncio.ensure_future(
-                    self._polling_heartbeat_loop()
-                )
+                self._heartbeat_restart_times = []
+                self._arm_polling_heartbeat()
 
             # Command-menu registration, DM-topic setup, and the status
             # indicator each make Bot API calls that can stall for certain
