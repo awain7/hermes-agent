@@ -44,7 +44,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Callable, Dict, Optional, Any, List, Union
+from typing import Callable, Dict, Optional, Any, List, Tuple, Union
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -2896,6 +2896,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
 
+        # Same idea for named-profile adapters under multiplex_profiles.
+        # These cannot share _failed_platforms: five profiles all serve
+        # Platform.TELEGRAM, so the bare-enum key would collide. Without
+        # this queue a profile whose connect timed out at startup stayed
+        # dead until the next full gateway restart while the other bots
+        # ran fine — a silent, indefinite outage for just that bot.
+        # Key: (profile_name, Platform),
+        # Value: {"config": ..., "profile_home": Path, "attempts": int, "next_retry": float}
+        self._failed_profile_platforms: Dict[Tuple[str, Platform], Dict[str, Any]] = {}
+
         # Track pending /update prompt responses per session.
         # Key: session_key, Value: True when a prompt is waiting for user input.
         self._update_prompt_pending: Dict[str, bool] = {}
@@ -3888,6 +3898,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         If the error is retryable (e.g. network blip, DNS failure), queue the
         platform for background reconnection instead of giving up permanently.
         """
+        # Named-profile adapters live in _profile_adapters, not self.adapters,
+        # so every check below would misfire for them: the stale-owner check
+        # sees the default profile's healthy adapter and swallows the
+        # notification (leaving the profile's bot a zombie until the next full
+        # restart), and the retry queueing would re-queue the *default*
+        # profile's config under the bare platform key. Route them to the
+        # profile-aware handler instead.
+        _profile_name = getattr(adapter, "_hermes_profile_name", None)
+        if isinstance(_profile_name, str) and _profile_name.strip():
+            await self._handle_profile_adapter_fatal_error(
+                adapter, _profile_name.strip()
+            )
+            return
+
         # Snapshot the current owner of this platform slot before doing
         # anything else. If it's neither this adapter nor empty, a different
         # adapter has already taken over (e.g. this is a delayed notification
@@ -3977,6 +4001,65 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "retry in background.",
                 len(self._failed_platforms),
             )
+
+    async def _handle_profile_adapter_fatal_error(
+        self, adapter: BasePlatformAdapter, profile_name: str
+    ) -> None:
+        """React to a named-profile adapter failure after startup.
+
+        The default-profile handler cannot serve these: its owner check looks
+        at ``self.adapters`` (where the default profile's healthy adapter
+        lives), so a named profile's fatal error was previously swallowed as
+        "stale" and the dead adapter stayed in ``_profile_adapters`` as a
+        zombie — that one bot silently ignored every message until the next
+        full gateway restart.
+        """
+        platform = adapter.platform
+        profile_map = self._profile_adapters.get(profile_name) or {}
+        existing = profile_map.get(platform)
+        if existing is not None and existing is not adapter:
+            logger.debug(
+                "Ignoring stale fatal error from a superseded %s adapter "
+                "instance (profile: %s): %s",
+                platform.value, profile_name,
+                adapter.fatal_error_code or "unknown",
+            )
+            return
+
+        logger.error(
+            "Fatal %s adapter error (profile: %s, %s): %s",
+            platform.value, profile_name,
+            adapter.fatal_error_code or "unknown",
+            adapter.fatal_error_message or "unknown error",
+        )
+
+        if existing is adapter:
+            # Claim-before-await, same rationale as the default-profile path.
+            profile_map.pop(platform, None)
+            await self._safe_adapter_disconnect(adapter, platform)
+
+        if not adapter.fatal_error_retryable:
+            logger.error(
+                "%s (profile: %s) hit a non-retryable error; not queuing "
+                "for reconnect",
+                platform.value, profile_name,
+            )
+            return
+
+        profile_home = getattr(adapter, "_hermes_profile_home", None)
+        if profile_home is None:
+            logger.error(
+                "%s (profile: %s) cannot be queued for reconnect: adapter "
+                "carries no profile home path",
+                platform.value, profile_name,
+            )
+            return
+        # attempts=0/delay=0 → the watcher retries on its next tick, matching
+        # the default profile's runtime-failure semantics.
+        self._queue_profile_platform_retry(
+            profile_name, profile_home, platform, adapter.config,
+            attempts=0, delay=0.0,
+        )
 
     def _request_clean_exit(self, reason: str) -> None:
         self._exit_cleanly = True
@@ -7233,11 +7316,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
         # Start background reconnection watcher for platforms that failed at startup
-        if self._failed_platforms:
+        if self._failed_platforms or self._failed_profile_platforms:
+            _failed_names = [p.value for p in self._failed_platforms]
+            _failed_names += [
+                f"{p.value} (profile: {name})"
+                for (name, p) in self._failed_profile_platforms
+            ]
             logger.info(
                 "Starting reconnection watcher for %d failed platform(s): %s",
-                len(self._failed_platforms),
-                ", ".join(p.value for p in self._failed_platforms),
+                len(_failed_names),
+                ", ".join(_failed_names),
             )
         asyncio.create_task(self._platform_reconnect_watcher())
 
@@ -7732,12 +7820,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         await asyncio.sleep(10)  # initial delay — let startup finish
         while self._running:
-            if not self._failed_platforms:
+            # getattr-guarded like the pause/resume helpers: long-lived test
+            # stubs build the runner via object.__new__ without this queue.
+            if not self._failed_platforms and not getattr(
+                self, "_failed_profile_platforms", None
+            ):
                 # Nothing to reconnect — sleep and check again
                 for _ in range(30):
                     if not self._running:
                         return
-                    if self._failed_platforms:
+                    if self._failed_platforms or getattr(
+                        self, "_failed_profile_platforms", None
+                    ):
                         break
                     await asyncio.sleep(1)
                 continue
@@ -7898,11 +7992,163 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # resolution failure, etc.) is inherently transient — keep
                     # retrying at the backoff cap rather than auto-pausing.
 
+            # Named-profile adapters queued by _start_one_profile_adapters
+            # get the same treatment on every pass.
+            await self._retry_failed_profile_platforms()
+
             # Check every 10 seconds for platforms that need reconnection
             for _ in range(10):
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _queue_profile_platform_retry(
+        self,
+        profile_name: str,
+        profile_home,
+        platform,
+        platform_config,
+        *,
+        attempts: int = 1,
+        delay: float = 30.0,
+    ) -> None:
+        """Queue a named-profile adapter that failed to connect for retry.
+
+        Mirrors the ``_failed_platforms`` bookkeeping the default profile
+        gets, keyed by ``(profile_name, platform)`` because every profile
+        serves the same Platform enum values under multiplex. Startup
+        failures use the default 30s delay; runtime fatal errors pass
+        ``attempts=0, delay=0`` so the watcher retries immediately, matching
+        the default profile's runtime path.
+        """
+        key = (profile_name, platform)
+        if key in self._failed_profile_platforms:
+            return
+        self._failed_profile_platforms[key] = {
+            "config": platform_config,
+            "profile_home": profile_home,
+            "attempts": attempts,
+            "next_retry": time.monotonic() + delay,
+        }
+        logger.info(
+            "Queued %s (profile: %s) for background reconnect",
+            platform.value, profile_name,
+        )
+
+    async def _retry_failed_profile_platforms(self) -> None:
+        """Reconnect named-profile adapters that failed at startup.
+
+        Before this queue existed, a profile whose Telegram connect timed
+        out during gateway startup was a terminal failure: the gateway
+        logged "✗ telegram error (profile: X)", carried on with the
+        remaining platforms, and that one bot stayed dead until the next
+        full restart. Runs from the same watcher loop as the default
+        profile's ``_failed_platforms`` scan, with the same backoff ladder
+        and ``is_reconnect=True`` semantics (preserve the server-side
+        update queue so messages sent while the bot was down are delivered).
+
+        Deliberately does NOT touch ``_update_platform_runtime_status``:
+        that status table is keyed by bare platform name, so a secondary
+        profile's retry state would overwrite the default profile's live
+        "connected" entry.
+        """
+        _BACKOFF_CAP = 300  # keep in step with the default-profile ladder
+        queue = getattr(self, "_failed_profile_platforms", None)
+        if not queue:
+            return
+        now = time.monotonic()
+        for key in list(queue.keys()):
+            if not self._running:
+                return
+            info = queue.get(key)
+            if info is None:
+                continue
+            if info.get("paused"):
+                continue
+            if now < info["next_retry"]:
+                continue
+
+            profile_name, platform = key
+            attempt = info["attempts"] + 1
+            logger.info(
+                "Reconnecting %s (profile: %s, attempt %d)...",
+                platform.value, profile_name, attempt,
+            )
+
+            adapter = None
+            try:
+                with _profile_runtime_scope(info["profile_home"]):
+                    adapter = self._create_adapter(platform, info["config"])
+                if not adapter:
+                    logger.warning(
+                        "Reconnect %s (profile: %s): adapter creation returned "
+                        "None, removing from retry queue",
+                        platform.value, profile_name,
+                    )
+                    del queue[key]
+                    continue
+                try:
+                    adapter._hermes_profile_name = profile_name
+                    adapter._hermes_profile_home = info["profile_home"]
+                except Exception:
+                    pass
+
+                # Same handler wiring as _start_one_profile_adapters — the
+                # profile-stamping message handler is what routes this
+                # adapter's turns to the right home.
+                adapter.set_message_handler(
+                    self._make_profile_message_handler(profile_name)
+                )
+                adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
+                adapter.set_session_store(self.session_store)
+                adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+                adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
+                adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
+                adapter._busy_text_mode = self._busy_text_mode
+
+                with _profile_runtime_scope(info["profile_home"]):
+                    success = await self._connect_adapter_with_timeout(
+                        adapter, platform, is_reconnect=True
+                    )
+                if success:
+                    self._profile_adapters.setdefault(profile_name, {})[platform] = adapter
+                    del queue[key]
+                    logger.info(
+                        "✓ %s reconnected (profile: %s)",
+                        platform.value, profile_name,
+                    )
+                    try:
+                        from gateway.channel_directory import build_channel_directory
+                        await build_channel_directory(self.adapters, self._profile_adapters)
+                    except Exception:
+                        pass
+                elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
+                    logger.warning(
+                        "Reconnect %s (profile: %s): non-retryable error (%s), "
+                        "removing from retry queue",
+                        platform.value, profile_name, adapter.fatal_error_message,
+                    )
+                    await _dispose_unused_adapter(adapter)
+                    del queue[key]
+                else:
+                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
+                    info["attempts"] = attempt
+                    info["next_retry"] = time.monotonic() + backoff
+                    logger.info(
+                        "Reconnect %s (profile: %s) failed, next retry in %ds",
+                        platform.value, profile_name, backoff,
+                    )
+                    await _dispose_unused_adapter(adapter)
+            except Exception as e:
+                if adapter is not None:
+                    await _dispose_unused_adapter(adapter)
+                backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
+                info["attempts"] = attempt
+                info["next_retry"] = time.monotonic() + backoff
+                logger.warning(
+                    "Reconnect %s (profile: %s) error: %s, next retry in %ds",
+                    platform.value, profile_name, e, backoff,
+                )
 
     async def stop(
         self,
@@ -8426,6 +8672,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             try:
                 adapter._hermes_profile_name = profile_name
+                # The fatal-error handler needs the home path to re-queue a
+                # runtime failure under the right profile scope.
+                adapter._hermes_profile_home = profile_home
             except Exception:
                 pass
 
@@ -8467,9 +8716,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 else:
                     logger.warning("✗ %s failed to connect (profile: %s)", platform.value, profile_name)
                     await self._safe_adapter_disconnect(adapter, platform)
+                    # Startup failure must not be terminal for this profile:
+                    # hand the adapter to the reconnect watcher so the bot
+                    # comes back once connectivity does.
+                    self._queue_profile_platform_retry(
+                        profile_name, profile_home, platform, platform_config
+                    )
             except Exception as e:
                 logger.error("✗ %s error (profile: %s): %s", platform.value, profile_name, e)
                 await self._safe_adapter_disconnect(adapter, platform)
+                self._queue_profile_platform_retry(
+                    profile_name, profile_home, platform, platform_config
+                )
         return connected
 
     def _make_profile_message_handler(self, profile_name: str):

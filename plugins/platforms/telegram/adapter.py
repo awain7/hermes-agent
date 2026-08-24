@@ -28,10 +28,12 @@ try:
         LinkPreviewOptions = None
     from telegram.ext import (
         Application,
+        ApplicationHandlerStop,
         CommandHandler,
         CallbackQueryHandler,
         MessageHandler as TelegramMessageHandler,
         ContextTypes,
+        TypeHandler,
         filters,
     )
     from telegram.constants import ParseMode, ChatType
@@ -46,9 +48,11 @@ except ImportError:
     InlineKeyboardMarkup = Any
     LinkPreviewOptions = None
     Application = Any
+    ApplicationHandlerStop = Exception
     CommandHandler = Any
     CallbackQueryHandler = Any
     TelegramMessageHandler = Any
+    TypeHandler = Any
     HTTPXRequest = Any
     filters = None
     ParseMode = None
@@ -122,6 +126,7 @@ def check_telegram_requirements() -> bool:
     global InlineKeyboardMarkup, LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
+    global TypeHandler, ApplicationHandlerStop
     if TELEGRAM_AVAILABLE:
         return True
     try:
@@ -141,6 +146,8 @@ def check_telegram_requirements() -> bool:
             CallbackQueryHandler as _CQH,
             MessageHandler as _MH,
             ContextTypes as _CT, filters as _filters,
+            TypeHandler as _TH,
+            ApplicationHandlerStop as _AHS,
         )
         from telegram.constants import ParseMode as _PM, ChatType as _CtT
         from telegram.request import HTTPXRequest as _HR
@@ -161,6 +168,8 @@ def check_telegram_requirements() -> bool:
     ParseMode = _PM
     ChatType = _CtT
     HTTPXRequest = _HR
+    TypeHandler = _TH
+    ApplicationHandlerStop = _AHS
     TELEGRAM_AVAILABLE = True
     return True
 
@@ -331,6 +340,17 @@ class TelegramAdapter(BasePlatformAdapter):
     _TEXT_BATCH_SHORT_LEN = 1024
     _TEXT_BATCH_SHORT_DELAY_S = 0.24
 
+    # Maximum age (seconds) of a queued inbound message before the stale-update
+    # guard drops it instead of processing it. connect() always preserves the
+    # server-side getUpdates queue now (drop_pending_updates=False even on a
+    # cold boot), so a message sent during a routine restart window — the
+    # nightly auto-update, a crash-to-relaunch gap, a reboot — is delivered
+    # instead of silently vanishing. This cutoff bounds the other side of that
+    # trade: after a *long* outage Telegram replays up to 24h of queue, and
+    # hours-old commands should not fire blind. Override with
+    # HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE (0 disables the guard entirely).
+    _PENDING_MESSAGE_MAX_AGE_S = 600.0
+
     @staticmethod
     def _env_float_clamped(
         name: str,
@@ -369,6 +389,11 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app: Optional[Application] = None
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
+        self._pending_message_max_age_s: float = self._env_float_clamped(
+            "HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE",
+            self._PENDING_MESSAGE_MAX_AGE_S,
+            min_value=0.0,
+        )
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
@@ -2755,13 +2780,17 @@ class TelegramAdapter(BasePlatformAdapter):
         instead.  Webhook mode is useful for cloud deployments (Fly.io,
         Railway) where inbound HTTP can wake a suspended machine.
 
-        ``is_reconnect`` distinguishes a cold first boot (False — drop any
-        stale Bot API queue) from a watcher reconnect after a prolonged
-        outage (True — preserve the updates Telegram queued while the bot
-        was offline, otherwise every message sent during the outage is
-        silently lost). The in-process network-error ladder and the
-        409-conflict handler already pass ``drop_pending_updates=False``
-        for the same reason; bootstrap follows suit on the reconnect path.
+        ``is_reconnect`` distinguishes a cold first boot from a watcher
+        reconnect for logging/bookkeeping, but both paths now preserve the
+        server-side Bot API queue (``drop_pending_updates=False``): a cold
+        boot after the nightly auto-update, a crash, or a reboot is exactly
+        when users have messages queued from the downtime window, and the
+        old drop-on-first-boot behavior silently discarded them. The
+        stale-update guard (``_drop_stale_pending_update``) bounds the
+        replay instead, dropping queued messages older than
+        ``HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE`` (default 600s). The
+        in-process network-error ladder and the 409-conflict handler pass
+        ``drop_pending_updates=False`` as they always did.
 
         Env vars for webhook mode::
 
@@ -2937,6 +2966,14 @@ class TelegramAdapter(BasePlatformAdapter):
             ))
             # Handle inline keyboard button callbacks (update prompts)
             self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+            # Stale-update guard, group -1 so it runs before every handler
+            # above: connect() preserves Telegram's server-side queue across
+            # restarts (drop_pending_updates=False), and this guard bounds the
+            # replay window by dropping messages older than the cutoff. Fresh
+            # messages and non-message updates (callbacks, edits) pass through.
+            self._app.add_handler(
+                TypeHandler(Update, self._drop_stale_pending_update), group=-1
+            )
             
             # Start polling — retry initialize() for transient TLS resets.
             # Each attempt is capped by _init_timeout so a single unreachable
@@ -3023,9 +3060,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     allowed_updates=Update.ALL_TYPES,
                     # Webhooks are push-based — Telegram does not hold a
                     # server-side getUpdates queue, so this flag is a no-op
-                    # in practice. Mirror the polling path's reconnect
+                    # in practice. Mirror the polling path's always-preserve
                     # semantics for consistency.
-                    drop_pending_updates=not is_reconnect,
+                    drop_pending_updates=False,
                 )
                 self._webhook_mode = True
                 logger.info(
@@ -3070,10 +3107,17 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._polling_error_callback_ref = _polling_error_callback
 
                 polling_started = await self._start_polling_resilient(
-                    # On a cold first boot drop the stale Bot API queue; on a
-                    # watcher reconnect after an outage preserve it so messages
-                    # sent while the bot was offline are delivered (#46621).
-                    drop_pending_updates=not is_reconnect,
+                    # Always preserve the server-side Bot API queue — cold
+                    # boot included. A cold boot after the nightly
+                    # auto-update, a crash, or a reboot is exactly when users
+                    # have messages queued from the downtime window, and the
+                    # old drop-on-first-boot behavior silently discarded
+                    # them. The stale-update guard (_drop_stale_pending_update,
+                    # group -1) bounds the replay after a *long* outage by
+                    # dropping messages older than the age cutoff, which is
+                    # what #46621's blanket drop was really protecting
+                    # against.
+                    drop_pending_updates=False,
                     error_callback=_polling_error_callback,
                 )
                 if not polling_started:
@@ -7050,6 +7094,49 @@ class TelegramAdapter(BasePlatformAdapter):
         consuming channel posts without ever building a gateway event.
         """
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
+
+    async def _drop_stale_pending_update(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """group=-1 guard: drop queued inbound messages older than the cutoff.
+
+        Runs before every group-0 handler. connect() preserves the
+        server-side getUpdates queue across restarts, so this is the only
+        thing standing between a long outage and a blind replay of hours-old
+        commands. Scope is deliberately narrow:
+
+        - Callback queries pass through untouched — pressing a button on an
+          old message is a legitimate, *current* action.
+        - Edited messages are aged by ``edit_date`` (the edit is the fresh
+          intent, not the original send time).
+        - Anything without a usable timestamp passes through; the guard
+          fails open because dropping real traffic is the worse error.
+        """
+        max_age = self._pending_message_max_age_s
+        if max_age <= 0:
+            return
+        if getattr(update, "callback_query", None) is not None:
+            return
+        message = self._effective_update_message(update)
+        if message is None:
+            return
+        msg_date = getattr(message, "edit_date", None) or getattr(message, "date", None)
+        if msg_date is None:
+            return
+        try:
+            age = (datetime.now(timezone.utc) - msg_date).total_seconds()
+        except TypeError:
+            return  # naive/fake datetime (tests, exotic clients) — fail open
+        if age <= max_age:
+            return
+        logger.info(
+            "[%s] Dropping stale queued message from chat %s (age %.0fs > %.0fs cutoff)",
+            self.name,
+            getattr(getattr(message, "chat", None), "id", "?"),
+            age,
+            max_age,
+        )
+        raise ApplicationHandlerStop
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.

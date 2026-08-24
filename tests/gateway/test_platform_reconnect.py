@@ -62,6 +62,8 @@ def _make_runner():
     runner._exit_with_failure = False
     runner._exit_cleanly = False
     runner._failed_platforms = {}
+    runner._failed_profile_platforms = {}
+    runner._profile_adapters = {}
     runner.adapters = {}
     runner.delivery_router = MagicMock()
     runner._running_agents = {}
@@ -840,3 +842,248 @@ class TestPlatformSlashCommand:
         runner = _make_runner()
         out = await runner._handle_platform_command(self._make_event("/platform"))
         assert "Gateway platforms" in out
+
+
+# --- Named-profile reconnect queue (multiplex) ---
+
+
+def _make_profile_runner(tmp_path):
+    """Extend the stub runner with the multiplex profile-queue state."""
+    runner = _make_runner()
+    runner._failed_profile_platforms = {}
+    runner._profile_adapters = {}
+    runner._busy_text_mode = "queue"
+    runner._sync_voice_mode_state_to_adapter = MagicMock()
+    return runner
+
+
+class TestProfilePlatformReconnect:
+    """Named-profile adapters get the same reconnect treatment as the default
+    profile. Before the (profile_name, platform) queue existed, a profile
+    whose connect timed out at gateway startup — or whose adapter hit a
+    retryable fatal error at runtime — stayed dead until the next full
+    gateway restart while the other bots ran fine."""
+
+    def test_queue_records_profile_entry(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        cfg = PlatformConfig(enabled=True, token="test")
+        runner._queue_profile_platform_retry("daily", tmp_path, Platform.TELEGRAM, cfg)
+        info = runner._failed_profile_platforms[("daily", Platform.TELEGRAM)]
+        assert info["config"] is cfg
+        assert info["profile_home"] == tmp_path
+        assert info["attempts"] == 1
+        assert info["next_retry"] > time.monotonic()
+
+    def test_queue_is_idempotent(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        cfg = PlatformConfig(enabled=True, token="test")
+        runner._queue_profile_platform_retry("daily", tmp_path, Platform.TELEGRAM, cfg)
+        first = runner._failed_profile_platforms[("daily", Platform.TELEGRAM)]
+        runner._queue_profile_platform_retry(
+            "daily", tmp_path, Platform.TELEGRAM, PlatformConfig(enabled=True, token="other")
+        )
+        assert runner._failed_profile_platforms[("daily", Platform.TELEGRAM)] is first
+
+    def test_profile_key_does_not_collide_with_default_queue(self, tmp_path):
+        """Five profiles all serve Platform.TELEGRAM — the profile queue must
+        be keyed by (profile_name, platform) and stay disjoint from
+        _failed_platforms' bare-enum keys."""
+        runner = _make_profile_runner(tmp_path)
+        cfg = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[Platform.TELEGRAM] = {
+            "config": cfg, "attempts": 1, "next_retry": time.monotonic() + 30,
+        }
+        runner._queue_profile_platform_retry("daily", tmp_path, Platform.TELEGRAM, cfg)
+        runner._queue_profile_platform_retry("travel", tmp_path, Platform.TELEGRAM, cfg)
+        assert len(runner._failed_profile_platforms) == 2
+        assert Platform.TELEGRAM in runner._failed_platforms
+
+    @pytest.mark.asyncio
+    async def test_profile_reconnect_succeeds_and_installs_adapter(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        runner._failed_profile_platforms[("daily", Platform.TELEGRAM)] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "profile_home": tmp_path,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+        adapter = StubAdapter(succeed=True)
+        with patch.object(runner, "_create_adapter", return_value=adapter):
+            with patch(
+                "gateway.channel_directory.build_channel_directory",
+                new=AsyncMock(return_value={"platforms": {}}),
+            ):
+                await runner._retry_failed_profile_platforms()
+
+        assert ("daily", Platform.TELEGRAM) not in runner._failed_profile_platforms
+        assert runner._profile_adapters["daily"][Platform.TELEGRAM] is adapter
+        # Reconnect must preserve the server-side update queue (#46621).
+        assert adapter.connect_calls == [True]
+        # The adapter is stamped for profile routing and future fatal errors.
+        assert adapter._hermes_profile_name == "daily"
+        assert adapter._hermes_profile_home == tmp_path
+        # The default profile's slot is untouched.
+        assert Platform.TELEGRAM not in runner.adapters
+
+    @pytest.mark.asyncio
+    async def test_profile_reconnect_failure_backs_off(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        runner._failed_profile_platforms[("daily", Platform.TELEGRAM)] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "profile_home": tmp_path,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+        adapter = StubAdapter(succeed=False, fatal_error="DNS failure", fatal_retryable=True)
+        with patch.object(runner, "_create_adapter", return_value=adapter):
+            await runner._retry_failed_profile_platforms()
+
+        info = runner._failed_profile_platforms[("daily", Platform.TELEGRAM)]
+        assert info["attempts"] == 2
+        assert info["next_retry"] > time.monotonic()
+        assert "daily" not in runner._profile_adapters or (
+            Platform.TELEGRAM not in runner._profile_adapters.get("daily", {})
+        )
+
+    @pytest.mark.asyncio
+    async def test_profile_reconnect_nonretryable_removed(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        runner._failed_profile_platforms[("daily", Platform.TELEGRAM)] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "profile_home": tmp_path,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+        adapter = StubAdapter(succeed=False, fatal_error="bad token", fatal_retryable=False)
+        with patch.object(runner, "_create_adapter", return_value=adapter):
+            await runner._retry_failed_profile_platforms()
+
+        assert ("daily", Platform.TELEGRAM) not in runner._failed_profile_platforms
+
+    @pytest.mark.asyncio
+    async def test_profile_reconnect_skips_when_not_time_yet(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        runner._failed_profile_platforms[("daily", Platform.TELEGRAM)] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "profile_home": tmp_path,
+            "attempts": 1,
+            "next_retry": time.monotonic() + 9999,
+        }
+        with patch.object(runner, "_create_adapter") as mock_create:
+            await runner._retry_failed_profile_platforms()
+        mock_create.assert_not_called()
+        assert ("daily", Platform.TELEGRAM) in runner._failed_profile_platforms
+
+    @pytest.mark.asyncio
+    async def test_watcher_services_profile_queue_even_when_default_queue_empty(
+        self, tmp_path
+    ):
+        """The watcher's idle check must consider the profile queue: with
+        _failed_platforms empty it previously slept forever and the profile
+        entries never got a retry."""
+        runner = _make_profile_runner(tmp_path)
+        runner._failed_profile_platforms[("daily", Platform.TELEGRAM)] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "profile_home": tmp_path,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+        retry_mock = AsyncMock()
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_retry_failed_profile_platforms", retry_mock):
+            runner._running = True
+            call_count = 0
+
+            async def fake_sleep(n):
+                nonlocal call_count
+                call_count += 1
+                if call_count > 1:
+                    runner._running = False
+                await real_sleep(0)
+
+            with patch("asyncio.sleep", side_effect=fake_sleep):
+                await runner._platform_reconnect_watcher()
+
+        retry_mock.assert_awaited()
+
+
+class TestProfileAdapterFatalError:
+    """Runtime fatal errors from named-profile adapters must be routed to the
+    profile-aware handler. Previously the default handler's stale-owner check
+    saw the default profile's healthy adapter in self.adapters and swallowed
+    the notification — the profile's dead adapter stayed in _profile_adapters
+    as a zombie that silently ignored every message."""
+
+    @pytest.mark.asyncio
+    async def test_profile_fatal_error_requeues_under_profile_key(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        # Default profile's healthy adapter occupies the bare-enum slot.
+        default_adapter = StubAdapter(succeed=True)
+        runner.adapters[Platform.TELEGRAM] = default_adapter
+
+        profile_adapter = StubAdapter(succeed=True)
+        profile_adapter._hermes_profile_name = "daily"
+        profile_adapter._hermes_profile_home = tmp_path
+        profile_adapter._set_fatal_error("network_error", "DNS failure", retryable=True)
+        runner._profile_adapters["daily"] = {Platform.TELEGRAM: profile_adapter}
+
+        await runner._handle_adapter_fatal_error(profile_adapter)
+
+        # The dead adapter is evicted and queued under the profile key…
+        assert Platform.TELEGRAM not in runner._profile_adapters["daily"]
+        info = runner._failed_profile_platforms[("daily", Platform.TELEGRAM)]
+        assert info["profile_home"] == tmp_path
+        assert info["attempts"] == 0
+        assert info["next_retry"] <= time.monotonic()
+        # …and the default profile is completely untouched.
+        assert runner.adapters[Platform.TELEGRAM] is default_adapter
+        assert Platform.TELEGRAM not in runner._failed_platforms
+
+    @pytest.mark.asyncio
+    async def test_profile_fatal_error_nonretryable_not_queued(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        profile_adapter = StubAdapter(succeed=True)
+        profile_adapter._hermes_profile_name = "daily"
+        profile_adapter._hermes_profile_home = tmp_path
+        profile_adapter._set_fatal_error("auth_error", "bad token", retryable=False)
+        runner._profile_adapters["daily"] = {Platform.TELEGRAM: profile_adapter}
+
+        await runner._handle_adapter_fatal_error(profile_adapter)
+
+        assert Platform.TELEGRAM not in runner._profile_adapters["daily"]
+        assert runner._failed_profile_platforms == {}
+
+    @pytest.mark.asyncio
+    async def test_profile_fatal_error_superseded_adapter_ignored(self, tmp_path):
+        runner = _make_profile_runner(tmp_path)
+        live_adapter = StubAdapter(succeed=True)
+        runner._profile_adapters["daily"] = {Platform.TELEGRAM: live_adapter}
+
+        stale_adapter = StubAdapter(succeed=True)
+        stale_adapter._hermes_profile_name = "daily"
+        stale_adapter._hermes_profile_home = tmp_path
+        stale_adapter._set_fatal_error("network_error", "old failure", retryable=True)
+
+        await runner._handle_adapter_fatal_error(stale_adapter)
+
+        # The live replacement stays installed; nothing is queued.
+        assert runner._profile_adapters["daily"][Platform.TELEGRAM] is live_adapter
+        assert runner._failed_profile_platforms == {}
+
+    @pytest.mark.asyncio
+    async def test_default_adapter_fatal_error_unaffected_by_profile_routing(self):
+        """An adapter without a profile stamp keeps the original behavior."""
+        runner = _make_runner()
+        runner._failed_profile_platforms = {}
+        runner._profile_adapters = {}
+        runner.stop = AsyncMock()
+
+        adapter = StubAdapter(succeed=True)
+        adapter._set_fatal_error("network_error", "DNS failure", retryable=True)
+        runner.adapters[Platform.TELEGRAM] = adapter
+
+        await runner._handle_adapter_fatal_error(adapter)
+
+        assert Platform.TELEGRAM in runner._failed_platforms
+        assert runner._failed_profile_platforms == {}
