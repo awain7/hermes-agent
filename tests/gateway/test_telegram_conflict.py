@@ -547,7 +547,7 @@ async def test_cold_connect_preserves_pending_updates(monkeypatch):
     silently discarded them. The stale-update guard
     (_drop_stale_pending_update) bounds the replay by age instead."""
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
-    captured = _build_polling_app(monkeypatch)
+    captured = _build_polling_app(monkeypatch, adapter)
 
     ok = await adapter.connect()  # default is_reconnect=False
 
