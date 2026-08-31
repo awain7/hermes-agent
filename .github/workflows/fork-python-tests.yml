@@ -1,0 +1,229 @@
+name: Fork Python tests
+
+# Fork-only test lane. Deliberately NOT wired into the inherited ci.yaml
+# orchestrator - it carries its own push/pull_request triggers.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The inherited upstream suite (.github/workflows/tests.yml, invoked by
+# ci.yaml) asks for `runs-on: ubuntu-latest-96-core`, a paid large runner only
+# the NousResearch org has. On this fork that job is accepted and then queues
+# forever, so the fork's own Python patches have no behavioural coverage in CI.
+# The lanes that DO run here are lint.yml (ruff + ty) and tests.yml's small
+# `e2e` job - the latter is proof this recipe works on a free runner: run
+# 33305730801 (PR #8, 2026-08-30) ran `uv sync --locked ... --extra dev` on
+# plain `ubuntu-latest` and finished `61 passed, 7 skipped in 14.36s`. What is
+# missing is the bulk suite, which is what this file adds.
+#
+# WHY A NEW FILE INSTEAD OF EDITING tests.yml
+# -------------------------------------------
+# `fork-python-tests.yml` is a name upstream does not use (verified against
+# NousResearch/hermes-agent's .github/workflows listing, 2026-08-31 - 30 files,
+# none of them this one). A file upstream never creates can never conflict
+# during the weekly `merge upstream/main`, so this lane survives every sync
+# untouched. Editing tests.yml would conflict on any sync where upstream
+# touches it, and would be lost the first time a conflict is resolved
+# "take theirs".
+#
+# SETUP PROVENANCE
+# ----------------
+# The uv / Python / dependency steps are copied from the upstream lanes that
+# already pass on this repo (tests.yml, tests-os.yml, lint.yml): actions pinned
+# by SHA, `astral-sh/setup-uv` pinned to 0.9.28 with its cache keyed on
+# pyproject.toml + uv.lock, and `uv python install 3.11` / `uv sync --locked`
+# both wrapped in the repo's own ./.github/actions/retry composite. Identical
+# extras list, so both jobs here share one warm cache entry.
+#
+# NO xdist ON PURPOSE
+# -------------------
+# The repo's canonical runner is scripts/run_tests.sh, which spawns one fresh
+# `python -m pytest <file>` subprocess per test FILE. tests.yml states the
+# rationale outright: "No xdist, no shared workers, no module-level state
+# leakage between files." Several tests here replace the `telegram` package in
+# sys.modules (tests/gateway/conftest.py), so cross-file isolation is
+# load-bearing. pytest-xdist is also absent from the locked dev extras, and
+# pyproject.toml / uv.lock are upstream-owned files this lane must not touch.
+#
+# BRANCH PROTECTION
+# -----------------
+# This lane is only a gate once `Fork patch-series tests` (job 1's `name:`) is
+# required by a ruleset on main. Until then it is advisory: PRs can merge red.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # An upstream sync lands several commits in a row; only the newest needs an
+  # answer. Cancel superseded runs unconditionally.
+  group: fork-python-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1. The fork's own patch series. Small, fast, deterministic - this is the
+  #    job to require in branch protection.
+  # -------------------------------------------------------------------------
+  patch-series:
+    name: Fork patch-series tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Every test file the fork owns or has modified relative to
+      # upstream/main, plus the two regression tests added alongside the
+      # profile-stamp fixes. Note test_platform_reconnect.py and
+      # test_telegram_network_reconnect.py are deliberately NOT here: they are
+      # upstream-owned, together ~70% of this job's wall clock, and job 2
+      # already runs them via tests/gateway/. This job stays ~90 seconds so it
+      # is cheap enough to require on every PR.
+      #
+      # An explicit list, not a glob: a file renamed or deleted by an upstream
+      # merge must fail the verify step loudly rather than silently shrink the
+      # lane's coverage.
+      FORK_TEST_FILES: >-
+        tests/agent/test_system_prompt_restore.py
+        tests/gateway/test_api_server_profile_prefix_misdelivery.py
+        tests/gateway/test_background_command.py
+        tests/gateway/test_keep_typing_timeout.py
+        tests/gateway/test_multiplex_profile_scope.py
+        tests/gateway/test_telegram_conflict.py
+        tests/gateway/test_telegram_pending_update_probe.py
+        tests/gateway/test_telegram_stale_pending_guard.py
+        tests/gateway/test_telegram_thread_fallback.py
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          # Pinned for the reason tests.yml pins it: unpinned, setup-uv fetches
+          # a "latest" manifest from raw.githubusercontent.com on every job and
+          # a transient fetch failure fails the whole job.
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        uses: ./.github/actions/retry
+        with:
+          command: uv python install 3.11
+
+      - name: Install dependencies
+        # Byte-identical to the extras line in tests.yml / tests-os.yml.
+        # tests/conftest.py sets HERMES_DISABLE_LAZY_INSTALLS=1, so the SDKs
+        # behind these extras must be present up front.
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+
+      - name: Minimize uv cache
+        run: uv cache prune --ci
+
+      - name: Verify every selected test file still exists
+        run: |
+          set -euo pipefail
+          missing=0
+          # Word splitting is intentional: FORK_TEST_FILES is a space-separated
+          # list of repo-relative paths, none containing spaces.
+          # shellcheck disable=SC2086
+          for f in $FORK_TEST_FILES; do
+            if [ ! -f "$f" ]; then
+              echo "::error file=$f::selected fork test file is missing - renamed or deleted by an upstream merge?"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Update FORK_TEST_FILES in .github/workflows/fork-python-tests.yml before merging."
+            exit 1
+          fi
+          echo "all $(wc -w <<< "$FORK_TEST_FILES") selected files present"
+
+      - name: Run fork patch-series tests
+        # scripts/run_tests.sh is the repo's canonical runner: per-file
+        # subprocess isolation, a hermetic `env -i`, and a one-shot re-run of a
+        # failing FILE reported as FLAKY rather than hidden. It finds ./.venv
+        # itself - no activate needed.
+        run: |
+          set -euo pipefail
+          HERMES_TEST_WORKERS="$(nproc)"
+          export HERMES_TEST_WORKERS
+          # The runner's 300s per-file cap was tuned on a 96-core box; the same
+          # file dilates on a 4-vCPU shared runner. A genuinely hung file is
+          # still bounded by this job's timeout-minutes.
+          export HERMES_TEST_FILE_TIMEOUT=600
+          # shellcheck disable=SC2086
+          scripts/run_tests.sh $FORK_TEST_FILES -- --tb=short
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
+  # -------------------------------------------------------------------------
+  # 2. Blast radius of the patch series. The fork edits gateway/run.py,
+  #    gateway/config.py, gateway/channel_directory.py, gateway/platforms/base.py,
+  #    gateway/platforms/api_server.py, gateway/slash_commands.py,
+  #    plugins/platforms/telegram/adapter.py, agent/conversation_loop.py,
+  #    agent/system_prompt.py, agent/agent_init.py and run_agent.py.
+  #    tests/gateway/ + tests/agent/ + tests/run_agent/ are those modules' test
+  #    homes. tests/run_agent/ matters specifically because it is where
+  #    _stored_prompt_matches_runtime() is regression-tested
+  #    (test_compression_persistence.py) - the guard the profile stamps feed.
+  #    This is the job that catches a botched merge-conflict resolution in
+  #    gateway/run.py, which job 1 (asserting only the fork's ADDED behaviour)
+  #    would happily pass through.
+  # -------------------------------------------------------------------------
+  blast-radius:
+    name: Blast-radius suite (gateway + agent + run_agent)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        uses: ./.github/actions/retry
+        with:
+          command: uv python install 3.11
+
+      - name: Install dependencies
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+
+      - name: Minimize uv cache
+        run: uv cache prune --ci
+
+      - name: Run gateway + agent + run_agent suites
+        run: |
+          set -euo pipefail
+          HERMES_TEST_WORKERS="$(nproc)"
+          export HERMES_TEST_WORKERS
+          export HERMES_TEST_FILE_TIMEOUT=600
+          # Two file-level retries instead of the default one. These files are
+          # upstream's, and a handful are timing-sensitive asyncio tests tuned
+          # on a 96-core machine. A deterministic failure still fails every
+          # attempt, so a real regression cannot be laundered green; a
+          # pass-on-retry is reported as FLAKY.
+          export HERMES_TEST_FILE_RETRIES=2
+          scripts/run_tests.sh tests/gateway/ tests/agent/ tests/run_agent/ -- --tb=short
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""

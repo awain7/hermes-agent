@@ -18,6 +18,7 @@ knowing the host's topology); any other name fails closed with the existing
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from aiohttp import web
@@ -116,3 +117,98 @@ async def test_http_request_addressed_to_another_agent_is_404_not_answered(
         # Addressed to this agent, and unaddressed: both served.
         assert (await cli.get("/p/default/v1/test")).status == 200
         assert (await cli.get("/v1/test")).status == 200
+
+
+class TestAgentIsStampedWithRequestProfile:
+    """The agent built for a ``/p/<profile>/`` request carries that profile.
+
+    Unlike the gateway's /bg path, this one genuinely exercises the
+    stored-prompt reuse guard: the API server passes BOTH a persisted
+    ``session_id`` and a ``conversation_history``, which satisfies the
+    ``if conversation_history and agent._session_db:`` gate in
+    ``conversation_loop._restore_or_build_system_prompt()``. That guard skips
+    its ``Profile:`` comparison whenever the READER is unstamped, so an
+    unstamped agent here would silently reuse a cached system prompt built
+    under a different profile — and every profile shares one ``state.db``.
+    """
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_prefix_profile_is_passed_to_the_agent(self, adapter):
+        from unittest.mock import MagicMock, patch as _patch
+
+        from gateway.platforms import api_server as _api
+
+        token = _api._api_request_profile.set("travel")
+        try:
+            with _patch("gateway.run._resolve_runtime_agent_kwargs") as mk, \
+                 _patch("gateway.run._resolve_gateway_model") as mm, \
+                 _patch("gateway.run._load_gateway_config") as mc, \
+                 _patch("run_agent.AIAgent") as mock_agent_cls:
+                mk.return_value = {"api_key": "test-key", "base_url": None,
+                                   "provider": None, "api_mode": None,
+                                   "command": None, "args": []}
+                mm.return_value = "test/model"
+                mc.return_value = {}
+                mock_agent_cls.return_value = MagicMock()
+
+                adapter._create_agent()
+
+            assert mock_agent_cls.call_args.kwargs["profile"] == "travel"
+        finally:
+            _api._api_request_profile.reset(token)
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_no_prefix_stamps_nothing(self, adapter):
+        from unittest.mock import MagicMock, patch as _patch
+
+        with _patch("gateway.run._resolve_runtime_agent_kwargs") as mk, \
+             _patch("gateway.run._resolve_gateway_model") as mm, \
+             _patch("gateway.run._load_gateway_config") as mc, \
+             _patch("run_agent.AIAgent") as mock_agent_cls:
+            mk.return_value = {"api_key": "test-key", "base_url": None,
+                               "provider": None, "api_mode": None,
+                               "command": None, "args": []}
+            mm.return_value = "test/model"
+            mc.return_value = {}
+            mock_agent_cls.return_value = MagicMock()
+
+            adapter._create_agent()
+
+        assert mock_agent_cls.call_args.kwargs["profile"] is None
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_explicit_profile_survives_the_executor_thread_hop(self, adapter):
+        """The profile must be PLUMBED, not read from the ContextVar.
+
+        _create_agent runs inside `_run()` on a run_in_executor thread, and
+        ContextVars do not follow that hop -- the code says so itself where it
+        captures `request_profile = _api_request_profile.get()` on the loop
+        thread before defining `_run()`. `_profile_scope()` re-enters the
+        HERMES_HOME scope there but does not re-set _api_request_profile, so an
+        implementation that only read the ContextVar would stamp None on every
+        real request while still passing a same-thread test. This test runs
+        _create_agent on a worker thread with the ContextVar unset, exactly as
+        production does.
+        """
+        import concurrent.futures
+        from unittest.mock import MagicMock, patch as _patch
+
+        from gateway.platforms import api_server as _api
+
+        assert _api._api_request_profile.get() is None
+
+        with _patch("gateway.run._resolve_runtime_agent_kwargs") as mk, \
+             _patch("gateway.run._resolve_gateway_model") as mm, \
+             _patch("gateway.run._load_gateway_config") as mc, \
+             _patch("run_agent.AIAgent") as mock_agent_cls:
+            mk.return_value = {"api_key": "test-key", "base_url": None,
+                               "provider": None, "api_mode": None,
+                               "command": None, "args": []}
+            mm.return_value = "test/model"
+            mc.return_value = {}
+            mock_agent_cls.return_value = MagicMock()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                ex.submit(adapter._create_agent, profile="travel").result()
+
+        assert mock_agent_cls.call_args.kwargs["profile"] == "travel"

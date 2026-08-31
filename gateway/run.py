@@ -23792,6 +23792,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     provider_data_collection=pr.get("data_collection"),
                     session_id=task_id,
                     platform=platform_key,
+                    # Multiplex gateway profile this background task runs
+                    # under, for parity with the main-turn site above.
+                    # NOTE: this is hygiene, not a live fix. /bg mints a fresh
+                    # session_id per invocation and passes no
+                    # conversation_history, so the stored-prompt restore branch
+                    # in conversation_loop._restore_or_build_system_prompt() is
+                    # never taken here and _stored_prompt_matches_runtime()
+                    # never runs on this path. The persona is already correct
+                    # regardless: _run_background_task wraps the task in
+                    # _profile_runtime_scope(), so SOUL.md/config/secrets
+                    # already resolve to the right profile. Stamping producers
+                    # anyway is what keeps the guard meaningful, because it
+                    # skips its check entirely when the *reader* is unstamped.
+                    profile=getattr(source, "profile", None) or None,
                     user_id=source.user_id,
                     user_id_alt=source.user_id_alt,
                     user_name=source.user_name,
