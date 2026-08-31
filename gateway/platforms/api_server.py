@@ -2826,6 +2826,13 @@ class APIServerAdapter(BasePlatformAdapter):
         route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None,
         confirmed_runtime_lock: bool = False,
+        # Multiplex profile for this request. Passed EXPLICITLY because
+        # _create_agent runs on a run_in_executor thread, where the
+        # _api_request_profile ContextVar set by the /p/<profile>/ middleware
+        # is not visible (same reason _run() re-enters _profile_scope from a
+        # captured value). Falls back to the ContextVar for callers that build
+        # an agent on the event-loop thread.
+        profile: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -3128,6 +3135,20 @@ class APIServerAdapter(BasePlatformAdapter):
             "enabled_toolsets": enabled_toolsets,
             "session_id": session_id,
             "platform": "api_server",
+            # Multiplex profile selected by the /p/<profile>/ URL prefix.
+            # Unlike the /bg path, this one REALLY needs the stamp: the API
+            # server passes both a persisted session_id and a stored
+            # conversation_history, which satisfies the
+            # `if conversation_history and agent._session_db:` gate in
+            # conversation_loop._restore_or_build_system_prompt(), so the
+            # stored-prompt restore branch and _stored_prompt_matches_runtime()
+            # actually execute here. That guard skips its Profile comparison
+            # whenever the READER is unstamped, so without this an agent could
+            # silently reuse a cached system prompt built under a different
+            # profile — every profile shares one state.db. None when no /p/
+            # prefix was used (default profile), matching the guard's
+            # single-profile no-op semantics.
+            "profile": (profile or _api_request_profile.get()),
             "stream_delta_callback": stream_delta_callback,
             "tool_progress_callback": tool_progress_callback,
             "tool_start_callback": tool_start_callback,
@@ -7305,6 +7326,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_start_callback=tool_start_callback,
                         tool_complete_callback=tool_complete_callback,
                         gateway_session_key=gateway_session_key,
+                        profile=request_profile,
                         requested_model=requested_model,
                         requested_provider=requested_provider,
                         model_options=model_options,
@@ -7756,6 +7778,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         stream_delta_callback=_text_cb,
                         tool_progress_callback=event_cb,
                         gateway_session_key=gateway_session_key,
+                        profile=request_profile,
                         requested_model=agent_overrides.get("requested_model"),
                         requested_provider=agent_overrides.get("requested_provider"),
                         model_options=agent_overrides.get("model_options"),

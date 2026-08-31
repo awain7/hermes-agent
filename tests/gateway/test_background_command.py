@@ -163,6 +163,81 @@ class TestRunBackgroundTask:
         mock_agent_instance.close.assert_called_once()
 
 
+    @pytest.mark.asyncio
+    async def test_background_agent_is_stamped_with_source_profile(self):
+        """A /bg task under a named multiplex profile stamps that profile.
+
+        The main-turn path stamps ``profile=`` so the system prompt carries a
+        ``Profile:`` line and conversation_loop._stored_prompt_matches_runtime()
+        can refuse a prompt built under a different profile. The /bg path is not
+        exposed to that reuse (fresh session_id, no conversation_history), but
+        the guard skips its comparison whenever the reader is unstamped, so
+        every producer must stamp for the check to stay meaningful.
+        """
+        runner = _make_runner()
+        mock_adapter = AsyncMock()
+        mock_adapter.send = AsyncMock()
+        mock_adapter.extract_media = MagicMock(return_value=([], "done"))
+        mock_adapter.extract_images = MagicMock(return_value=([], "done"))
+        runner.adapters[Platform.TELEGRAM] = mock_adapter
+        # Secondary-profile adapters live in _profile_adapters, and
+        # _adapter_for_source() resolves through the profile, so a bare
+        # runner.adapters registration alone would make delivery bail out
+        # before the agent is ever built.
+        runner._profile_adapters = {"travel": {Platform.TELEGRAM: mock_adapter}}
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="12345",
+            chat_id="67890",
+            user_name="testuser",
+            profile="travel",
+        )
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),              patch("gateway.run._load_gateway_config", return_value={}),              patch("run_agent.AIAgent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.shutdown_memory_provider = MagicMock()
+            mock_agent_instance.close = MagicMock()
+            mock_agent_instance.run_conversation.return_value = {
+                "final_response": "done", "messages": [],
+            }
+            MockAgent.return_value = mock_agent_instance
+
+            await runner._run_background_task("say hello", source, "bg_test")
+
+        assert MockAgent.call_args.kwargs["profile"] == "travel"
+
+    @pytest.mark.asyncio
+    async def test_background_agent_profile_is_none_without_a_profile(self):
+        """Single-profile gateways stamp nothing — the guard stays a no-op."""
+        runner = _make_runner()
+        mock_adapter = AsyncMock()
+        mock_adapter.send = AsyncMock()
+        mock_adapter.extract_media = MagicMock(return_value=([], "done"))
+        mock_adapter.extract_images = MagicMock(return_value=([], "done"))
+        runner.adapters[Platform.TELEGRAM] = mock_adapter
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="12345",
+            chat_id="67890",
+            user_name="testuser",
+        )
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),              patch("gateway.run._load_gateway_config", return_value={}),              patch("run_agent.AIAgent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.shutdown_memory_provider = MagicMock()
+            mock_agent_instance.close = MagicMock()
+            mock_agent_instance.run_conversation.return_value = {
+                "final_response": "done", "messages": [],
+            }
+            MockAgent.return_value = mock_agent_instance
+
+            await runner._run_background_task("say hello", source, "bg_test")
+
+        assert MockAgent.call_args.kwargs["profile"] is None
+
+
 # ---------------------------------------------------------------------------
 # /bg in help and known_commands
 # ---------------------------------------------------------------------------
