@@ -89,6 +89,7 @@ jobs:
         tests/agent/test_system_prompt_restore.py
         tests/gateway/test_api_server_profile_prefix_misdelivery.py
         tests/gateway/test_background_command.py
+        tests/gateway/test_gateway_platform_event_hook.py
         tests/gateway/test_keep_typing_timeout.py
         tests/gateway/test_multiplex_profile_scope.py
         tests/gateway/test_telegram_conflict.py
