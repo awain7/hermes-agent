@@ -19,7 +19,12 @@ from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
-DIRECTORY_PATH = get_hermes_home() / "channel_directory.json"
+# Resolved lazily (see ``_directory_path``): a multiplexed gateway serves
+# several profile homes from one process, so an import-time constant would pin
+# every profile's directory to whichever home imported this module first.
+# ``DIRECTORY_PATH`` / ``CHANNEL_ALIASES_PATH`` stay as explicit overrides
+# (tests patch them); ``None`` means "resolve from the current home".
+DIRECTORY_PATH: Optional[Path] = None
 # Throttle window for repeated Slack channel-directory refresh failures.
 # The directory rebuilds on a timer, so a persistent workspace error (e.g.
 # missing scope, revoked token) would otherwise re-log the same warning on
@@ -34,14 +39,23 @@ _slack_directory_warning_last: Dict[tuple[str, str], float] = {}
 # on every build AND every load, giving durable human-friendly names (and
 # letting you pre-name a chat before it has produced any traffic).
 # Format: {"<platform>": {"<chat_id>": "<friendly name>", ...}, ...}
-CHANNEL_ALIASES_PATH = get_hermes_home() / "channel_aliases.json"
+CHANNEL_ALIASES_PATH: Optional[Path] = None
+
+
+def _directory_path() -> Path:
+    return DIRECTORY_PATH or get_hermes_home() / "channel_directory.json"
+
+
+def _aliases_path() -> Path:
+    return CHANNEL_ALIASES_PATH or get_hermes_home() / "channel_aliases.json"
 
 
 def _load_channel_aliases() -> Dict[str, Dict[str, str]]:
-    if not CHANNEL_ALIASES_PATH.exists():
+    aliases_path = _aliases_path()
+    if not aliases_path.exists():
         return {}
     try:
-        with open(CHANNEL_ALIASES_PATH, encoding="utf-8") as f:
+        with open(aliases_path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
@@ -158,7 +172,8 @@ async def build_channel_directory(
     to a platform with no profile concept (Discord/Slack), unchanged from
     before this parameter existed.
 
-    Returns the directory dict and writes it to DIRECTORY_PATH.
+    Returns the directory dict and writes it to the current home's
+    ``channel_directory.json``.
     """
     from gateway.config import Platform
 
@@ -247,7 +262,7 @@ async def build_channel_directory(
     }
 
     try:
-        await asyncio.to_thread(atomic_json_write, DIRECTORY_PATH, directory)
+        await asyncio.to_thread(atomic_json_write, _directory_path(), directory)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
 
@@ -487,7 +502,7 @@ def _build_from_sessions_db(
     """Pull channels/contacts from state.db gateway session rows."""
     entries: List[Dict[str, str]] = []
     try:
-        from hermes_state import SessionDB
+        from hermes_state import SessionDB, get_shared_session_db, release_or_close
         if home_override is not None:
             # Read-only attach: never contends with the owning profile's
             # gateway writer, and skips schema init on a DB we don't own.
@@ -496,14 +511,14 @@ def _build_from_sessions_db(
                 return []
             db = SessionDB(db_path=db_path, read_only=True)
         else:
-            db = SessionDB()
+            db = get_shared_session_db()
         try:
             lister = getattr(db, "list_gateway_sessions", None)
             if not callable(lister):
                 return []
             rows = lister(platform=platform_name, active_only=False)
         finally:
-            db.close()
+            release_or_close(db)
 
         seen_ids = set()
         for row in rows:
@@ -584,12 +599,13 @@ def _build_from_sessions_json(
 
 def load_directory() -> Dict[str, Any]:
     """Load the cached channel directory from disk."""
-    if not DIRECTORY_PATH.exists():
+    directory_path = _directory_path()
+    if not directory_path.exists():
         base = {"updated_at": None, "platforms": {}}
         _apply_channel_aliases(base["platforms"])
         return base
     try:
-        with open(DIRECTORY_PATH, encoding="utf-8") as f:
+        with open(directory_path, encoding="utf-8") as f:
             data = json.load(f)
         # Re-apply aliases on read so friendly names take effect immediately,
         # even between timed rebuilds and for brand-new alias entries.
