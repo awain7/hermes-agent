@@ -90,3 +90,37 @@ def test_no_profile_adapters_writes_no_copies(tmp_path):
         asyncio.run(cd.build_channel_directory({Platform.TELEGRAM: _Adapter()}))
     assert (launch_home / "channel_directory.json").exists()
     assert not (tmp_path / "profiles").exists()
+
+
+def test_display_lists_each_target_once_and_hides_other_profiles():
+    dm = {"id": "8815498158", "name": "Tiat-uí Khóo", "type": "dm"}
+    platforms = {
+        "telegram": [
+            dict(dm),
+            dict(dm, profile="coding"),
+            dict(dm, profile="work"),
+            {"id": "-100777", "name": "home-only-group", "type": "group", "profile": "home"},
+        ]
+    }
+    unscoped = cd.format_directory_for_display(platforms)
+    assert unscoped.count("telegram:Tiat-uí Khóo") == 1
+    assert "home-only-group" in unscoped
+    work_view = cd.format_directory_for_display(platforms, profile="work")
+    assert work_view.count("telegram:Tiat-uí Khóo") == 1
+    assert "home-only-group" not in work_view
+
+
+def test_directory_view_for_profile_filters_then_dedupes():
+    dm = {"id": "8815498158", "name": "Tiat-uí Khóo", "type": "dm"}
+    platforms = {
+        "telegram": [dict(dm), dict(dm, profile="work"), dict(dm, profile="home")],
+        "discord": [],
+    }
+    view = cd.directory_view_for_profile(platforms, "work")
+    assert [(e["id"], e.get("profile")) for e in view["telegram"]] == [("8815498158", None)]
+    assert view["discord"] == []
+    # Falsy profile keeps every profile's targets but still one line per id.
+    assert [e["id"] for e in cd.directory_view_for_profile(platforms, "")["telegram"]] == ["8815498158"]
+    # Entries without an id are never collapsed.
+    raw = {"x": [{"name": "a"}, {"name": "b"}]}
+    assert cd.directory_view_for_profile(raw, "work")["x"] == raw["x"]
