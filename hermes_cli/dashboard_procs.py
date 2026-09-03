@@ -13,6 +13,7 @@ patches on ``hermes_cli.main`` resolve unchanged.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -91,8 +92,33 @@ def _scan_dashboard_processes(
                 timeout=10,
                 errors="ignore",
             )
-            if result is None or result.returncode != 0 or result.stdout is None:
-                return []
+            if result is None or result.returncode != 0 or not (result.stdout or ""):
+                # wmic was removed from Windows 11 (and late Windows 10 builds):
+                # the spawn fails (result None) or prints nothing, and this scan
+                # used to return [] right here - so `hermes dashboard --stop` /
+                # `--status` and the stale-dashboard reaper in `hermes update`
+                # silently found nothing on such hosts. Fall back to PowerShell
+                # Get-CimInstance, emitting the same LIST-style lines so the
+                # parser below does not branch. Mirrors the fallback in
+                # hermes_cli.gateway._scan_gateway_pids.
+                powershell = shutil.which("powershell") or shutil.which("pwsh")
+                if powershell is None:
+                    return []
+                ps_cmd = (
+                    "Get-CimInstance Win32_Process | "
+                    "ForEach-Object { "
+                    "  'CommandLine=' + ($_.CommandLine -replace \"`r`n\",' ' -replace \"`n\",' '); "
+                    "  'ProcessId=' + $_.ProcessId; "
+                    "  '' "
+                    "}"
+                )
+                result = bounded_probe_run(
+                    [powershell, "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                    timeout=15,
+                    errors="ignore",
+                )
+                if result is None or result.returncode != 0 or result.stdout is None:
+                    return []
             current_cmd = ""
             for line in result.stdout.split("\n"):
                 line = line.strip()

@@ -96,6 +96,8 @@ jobs:
         tests/gateway/test_telegram_pending_update_probe.py
         tests/gateway/test_telegram_stale_pending_guard.py
         tests/gateway/test_telegram_thread_fallback.py
+        tests/gateway/test_channel_directory_profile_copies.py
+        tests/hermes_cli/test_dashboard_procs_cim_fallback.py
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

@@ -233,20 +233,22 @@ async def build_channel_directory(
     # secondary profile enabling one of those is already rejected at startup
     # (multiplex secondary profiles can't bind their own port), so
     # session-based discovery covers everything multiplex actually supports.
+    profile_homes: Dict[str, Any] = {}
     if profile_adapters:
         try:
             from hermes_cli.profiles import get_profile_dir
         except Exception:
             get_profile_dir = None
         for profile_name, plat_adapters in profile_adapters.items():
+            try:
+                profile_home = get_profile_dir(profile_name) if get_profile_dir else None
+            except Exception:
+                profile_home = None
+            profile_homes[profile_name] = profile_home
             for platform in plat_adapters.keys():
                 plat_name = platform.value if hasattr(platform, "value") else str(platform)
                 if plat_name in _SKIP_SESSION_DISCOVERY:
                     continue
-                try:
-                    profile_home = get_profile_dir(profile_name) if get_profile_dir else None
-                except Exception:
-                    profile_home = None
                 entries = _build_from_sessions(plat_name, home_override=profile_home)
                 for entry in entries:
                     entry["profile"] = profile_name
@@ -265,6 +267,37 @@ async def build_channel_directory(
         await asyncio.to_thread(atomic_json_write, _directory_path(), directory)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
+
+    # Each secondary profile also gets its OWN copy, filtered to its targets
+    # (its tagged entries plus the untagged default-profile ones, the same
+    # view resolve_channel_name(profile=...) serves in-process). DIRECTORY_PATH
+    # resolves lazily from the current HERMES_HOME, so a process running under
+    # a secondary profile's home - ``hermes --profile <name> send --list`` or
+    # any reader without the gateway's launch-home pin - would otherwise find
+    # no directory at all: the shared, profile-tagged file lives only in the
+    # launch home.
+    for profile_name, profile_home in profile_homes.items():
+        if profile_home is None:
+            continue
+        own_copy = {
+            "updated_at": directory["updated_at"],
+            "platforms": {
+                plat_name: _filter_by_profile(channels, profile_name)
+                for plat_name, channels in platforms.items()
+            },
+        }
+        try:
+            await asyncio.to_thread(
+                atomic_json_write,
+                Path(profile_home) / "channel_directory.json",
+                own_copy,
+            )
+        except Exception as e:
+            logger.warning(
+                "Channel directory: failed to write profile '%s' copy: %s",
+                profile_name,
+                e,
+            )
 
     return directory
 
