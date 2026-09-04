@@ -139,6 +139,22 @@ def _emit_result(
     return _FAILURE_EXIT
 
 
+def _active_profile_name() -> str:
+    """Multiplex profile this CLI invocation runs as, or "" for no scoping.
+
+    Derived from HERMES_HOME (``hermes --profile <name>`` points it at the
+    profile's home). ``"custom"`` (an unrecognised HERMES_HOME) and any
+    lookup failure fall back to "", which keeps every directory entry.
+    """
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        name = get_active_profile_name()
+    except Exception:
+        return ""
+    return "" if name in (None, "", "custom") else str(name)
+
+
 def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
     """Print the channel directory (all configured targets across platforms).
 
@@ -155,6 +171,15 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
     except Exception as exc:
         print(f"hermes send: failed to load channel directory: {exc}", file=sys.stderr)
         return _FAILURE_EXIT
+
+    # Profile view (fork): drops other multiplex profiles' tagged entries and
+    # collapses the per-profile copies of one shared DM into a single line.
+    # Optional so a stand-in channel_directory module without the helper
+    # (tests) keeps the raw listing.
+    try:
+        from gateway.channel_directory import directory_view_for_profile
+    except Exception:
+        directory_view_for_profile = None
 
     try:
         raw = load_directory()
@@ -183,6 +208,9 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         # Directory contents alone are still useful; don't fail --list over
         # a config parse problem.
         pass
+
+    if directory_view_for_profile is not None:
+        platforms = directory_view_for_profile(platforms, _active_profile_name())
 
     if platform_filter:
         key = platform_filter.strip().lower()

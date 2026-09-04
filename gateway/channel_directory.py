@@ -678,6 +678,47 @@ def _filter_by_profile(
     ]
 
 
+def _dedupe_channels(channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse entries that name the same target id, keeping the first.
+
+    Under multiplexing one DM shows up once per profile that talks to the
+    user (Telegram keys DMs on the *user's* id): untagged for the default
+    profile plus one ``profile``-tagged copy per secondary. An unfiltered
+    view, or a profile view (untagged + own tag), therefore lists the same
+    person several times. The copies are interchangeable as send targets,
+    so one line per id is the honest listing. Entries without an ``id``
+    are kept as they are.
+    """
+    seen: set = set()
+    unique: List[Dict[str, Any]] = []
+    for ch in channels:
+        key = ch.get("id") if isinstance(ch, dict) else None
+        if key is None:
+            unique.append(ch)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(ch)
+    return unique
+
+
+def directory_view_for_profile(
+    platforms: Optional[Dict[str, Any]], profile: Optional[str]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return ``platforms`` scoped to *profile* with duplicate targets collapsed.
+
+    The view ``hermes send --list`` prints and ``--json`` emits: other
+    multiplex profiles' tagged entries are dropped (``_filter_by_profile``;
+    a falsy *profile* keeps everything) and each remaining target id is
+    listed once (``_dedupe_channels``).
+    """
+    return {
+        plat_name: _dedupe_channels(_filter_by_profile(list(channels or []), profile))
+        for plat_name, channels in (platforms or {}).items()
+    }
+
+
 def resolve_channel_name(
     platform_name: str, name: str, profile: Optional[str] = None
 ) -> Optional[str]:
@@ -757,6 +798,13 @@ def format_directory_for_display(
             plat_name: _filter_by_profile(channels, profile)
             for plat_name, channels in platforms.items()
         }
+    # One line per target: the multiplex directory carries one copy of a
+    # shared DM per profile (see _dedupe_channels), which is directory
+    # bookkeeping, not six different places to send to.
+    platforms = {
+        plat_name: _dedupe_channels(list(channels or []))
+        for plat_name, channels in platforms.items()
+    }
 
     if not platforms:
         return "No messaging platforms connected or no channels discovered yet."
