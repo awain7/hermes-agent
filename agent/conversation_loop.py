@@ -822,7 +822,7 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # test agents must not see a truthy auto-attribute here.
     _profile_attr = getattr(agent, "profile", None)
     current_profile = _profile_attr.strip() if isinstance(_profile_attr, str) else ""
-    if current_profile and line_value("Profile") != current_profile:
+    if current_profile and identity_line_value(prompt, "Profile") != current_profile:
         return False
     # Platform is deliberately NOT an identity field: a surface switch does not invalidate the
     # stored bytes, it only makes their interface section out of date, and that is corrected by
