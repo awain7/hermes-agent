@@ -23,22 +23,6 @@ def _current_session_profile() -> str:
         profile = ""
     return profile or os.environ.get("HERMES_PROFILE", "")
 
-
-def _resolve_runner_adapter(runner, platform):
-    """Profile-aware adapter lookup on the live gateway runner (fork).
-
-    Uses the runner's ``_authorization_adapter`` (multiplex profile-aware) when present; duck-typed
-    runner stand-ins that only carry an ``adapters`` map (tests, embedded frontends) fall back to a
-    plain platform lookup, preserving pre-multiplex behavior.
-    """
-    if runner is None:
-        return None
-    resolver = getattr(runner, "_authorization_adapter", None)
-    if callable(resolver):
-        return resolver(platform, _current_session_profile())
-    adapters = getattr(runner, "adapters", None)
-    return adapters.get(platform) if adapters else None
-
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE  # Discord snowflakes: numeric, same "<id>[:<thread>]" shape
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
