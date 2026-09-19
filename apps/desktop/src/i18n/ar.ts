@@ -1,6 +1,45 @@
 import { defineLocale } from './define-locale'
 
 export const ar = defineLocale({
+  catalog: {
+    listView: 'عرض القائمة',
+    cardView: 'عرض البطاقات',
+    installTitle: (name: string) => `تثبيت «${name}»؟`,
+    installDescription: 'ستتوفر هذه المهارة في الجلسات الجديدة. ثبّت من المصادر التي تثق بها فقط.',
+    installTo: 'التثبيت في',
+    thisComputer: 'هذا الكمبيوتر',
+    installing: 'جارٍ التثبيت…',
+    installComplete: (name: string) => `تم تثبيت «${name}»`,
+    destinationChanged: 'تغيرت وجهة التثبيت. أغلق هذا الحوار وافتح رابط التثبيت مجددًا.',
+    browse: 'تصفح',
+    installed: 'المثبتة',
+    searchSkills: 'البحث في المهارات',
+    searchPlugins: 'البحث في الإضافات',
+    allSources: 'كل المصادر',
+    allCategories: 'كل الفئات',
+    about: 'نبذة',
+    author: 'المؤلف',
+    source: 'المصدر',
+    category: 'الفئة',
+    version: 'الإصدار',
+    platforms: 'المنصات',
+    requires: 'المتطلبات',
+    tools: 'الأدوات',
+    hooks: 'الخطافات',
+    repository: 'المستودع',
+    documentation: 'التوثيق',
+    noResults: 'لا توجد نتائج مطابقة',
+    tryAnother: 'جرّب بحثًا آخر أو امسح عوامل التصفية.',
+    clearFilters: 'مسح عوامل التصفية',
+    loadFailed: 'تعذر تحميل الكتالوج',
+    retry: 'حاول مرة أخرى',
+    more: 'عرض المزيد',
+    pinned: 'التزام تمت مراجعته',
+    snapshotHint: 'من كتالوج Hermes. لا يتصل التصفح بمستودعات المصدر مطلقًا.',
+    installHint: 'راجع المصدر قبل التثبيت. تسري التغييرات على الجلسات الجديدة.',
+    results: (count: number) => `النتائج: ${count.toLocaleString('ar')}`,
+    back: 'العودة إلى النتائج'
+  },
   sessionImport: {
     title: 'المتابعة من تطبيق آخر',
     subtitle: 'انقل محادثة إلى Hermes وتابع من حيث توقفت.',
@@ -188,7 +227,10 @@ export const ar = defineLocale({
       errorTitle: 'تعذر الوصول إلى خادم MCP',
       errorMessage: name => `فشل فحص سلامة ${name} MCP.`,
       signIn: 'تسجيل الدخول',
-      view: 'عرض'
+      view: 'عرض',
+      disable: 'تعطيل',
+      disabledMessage: name => `تم تعطيل ${name} MCP. يمكنك إعادة تفعيله في أي وقت من الإمكانات → MCP.`,
+      disableFailed: name => `تعذّر تعطيل ${name} MCP.`
     },
     errors: {
       elevenLabsNeedsKey: 'يتطلب ElevenLabs STT المفتاح ELEVENLABS_API_KEY.',
@@ -197,7 +239,6 @@ export const ar = defineLocale({
       methodNotAllowed: 'رفضت خلفية سطح المكتب هذا الطلب (405 Method Not Allowed). جرب إعادة تشغيل Hermes Desktop.',
       microphonePermission: 'تم رفض إذن الميكروفون.',
       openaiRejectedApiKey: 'رفض OpenAI مفتاح API.',
-      openaiRejectedApiKeyWithStatus: status => `رفض OpenAI مفتاح API (${status} invalid_api_key).`,
       openaiTtsNeedsKey: 'يتطلب OpenAI TTS المفتاح VOICE_TOOLS_OPENAI_KEY أو OPENAI_API_KEY.',
       codeSkewRestartRequired: 'بعد التحديث ما زال هذا الخلفية يشغّل كودا قديما. أعد تشغيله لتحميل الكود الجديد.'
     },
@@ -223,9 +264,11 @@ export const ar = defineLocale({
     },
     native: {
       approvalTitle: 'مطلوب موافقة',
+      approvalTitleNamed: session => `مطلوب موافقة — ${session}`,
       approveAction: 'موافقة',
       rejectAction: 'رفض',
       inputTitle: 'مطلوب إدخال',
+      inputTitleNamed: session => `مطلوب إدخال — ${session}`,
       inputBody: 'ينتظر Hermes ردّك.',
       turnDoneTitle: 'أنهى Hermes',
       turnDoneBody: '',
@@ -581,10 +624,11 @@ export const ar = defineLocale({
       reactionsDesc: 'تفاعلات إيموجي بأسلوب iMessage — تفاعل مع الرسائل، ويمكن لـ Hermes التفاعل مع رسائلك.',
       tipsTitle: 'نصائح داخل التطبيق',
       tipsDesc:
-        'فقاعة صغيرة تشير إلى جزء من التطبيق، تظهر أحيانًا أثناء الخمول ومن Hermes عند الحاجة. تظهر كل نصيحة مرة واحدة.',
+        'نصائح تظهر أحيانًا من التطبيق وHermes. تظهر كل نصيحة مرة واحدة. تُعطّل تلقائيًا بعد أول 30 يومًا من الاستخدام، ويمكنك تفعيلها مجددًا.',
       tipsReset: count => `إظهار ${count} نصيحة مرة أخرى`,
       toursTitle: 'جولات إرشادية',
-      toursDesc: 'دع Hermes يرشدك في التطبيق، مع تعتيم الشاشة وإبراز كل خطوة.',
+      toursDesc:
+        'دع Hermes يرشدك في التطبيق مع إبراز كل خطوة. تُعطّل الجولات تلقائيًا بعد أول 30 يومًا من الاستخدام، ويمكنك تفعيلها مجددًا.',
       composerPopoutTitle: 'محرر عائم',
       composerPopoutDesc: 'السماح بسحب محرر الرسائل خارج موضعه. عطّل هذا الخيار لإبقائه مثبتًا في الأسفل.',
       vibeHeartsTitle: 'قلوب المزاج',
@@ -730,6 +774,7 @@ export const ar = defineLocale({
       'context.engine': 'محرك السياق',
       'compression.enabled': 'الضغط التلقائي',
       'compression.threshold': 'عتبة الضغط',
+      'compression.codexGpt55Autoraise': 'الرفع التلقائي لضغط Codex',
       'compression.targetRatio': 'هدف الضغط',
       'compression.protectLastN': 'الرسائل الأخيرة المحمية',
       'delegation.model': 'نموذج الوكيل الفرعي',
@@ -766,6 +811,7 @@ export const ar = defineLocale({
       'memory.userProfileEnabled': 'يحافظ على ملف مختصر لتفضيلات المستخدم.',
       'context.engine': 'استراتيجية إدارة المحادثات الطويلة قرب حد السياق.',
       'compression.enabled': 'يلخص السياق الأقدم عندما تكبر المحادثات.',
+      'compression.codexGpt55Autoraise': 'يرفع عتبة الضغط إلى 85٪ لنماذج ChatGPT Codex OAuth المدعومة.',
       'voice.autoTts': 'ينطق ردود المساعد تلقائياً.',
       'tts.xai.voiceId': 'معرف صوت xAI مثل eve أو معرف صوت مخصص.',
       'tts.xai.language': 'رمز لغة النطق، مثل en.',
@@ -826,6 +872,29 @@ export const ar = defineLocale({
       autosaveFailed: 'فشل الحفظ التلقائي',
       imported: 'تم استيراد الإعدادات',
       invalidJson: 'JSON غير صالح'
+    },
+    screenshot: {
+      enabledTitle: 'اختصار لقطة الشاشة',
+      enabledDesc:
+        'اضغط مفتاحَي Command معًا من أي تطبيق لالتقاط النافذة الأمامية وإرفاقها بمسودة Hermes الحالية. لا يُرسل أي شيء تلقائيًا. معطّل افتراضيًا ويُطبَّق على جهاز Mac هذا فقط. قد تتضمن النافذة محتوى حساسًا، لذا راجع المرفق قبل الإرسال.',
+      statusTitle: 'حالة اختصار لقطة الشاشة',
+      checking: 'جارٍ التحقق من اختصار لقطة الشاشة…',
+      disabled: 'اختصار لقطة الشاشة معطّل.',
+      starting: 'جارٍ بدء رصد الاختصار. لم يصبح جاهزًا بعد.',
+      ready: 'الاختصار جاهز. تُرفق اللقطات بالمسودة الحالية دون إرسالها.',
+      inputPermission:
+        'يتيح إذن مراقبة الإدخال لـ Hermes رصد مفتاحَي Command أثناء استخدام تطبيق آخر. اسمح لـ Hermes في إعدادات النظام ← الخصوصية والأمان ← مراقبة الإدخال، ثم عُد إلى هنا وأعد المحاولة.',
+      screenPermission:
+        'يتيح إذن تسجيل الشاشة لـ Hermes التقاط نافذة التطبيق الأمامية عند استخدام هذا الاختصار. اسمح لـ Hermes في إعدادات النظام ← الخصوصية والأمان ← تسجيل الشاشة، ثم عُد إلى هنا وأعد المحاولة. أعد تشغيل Hermes إذا طلب macOS ذلك.',
+      openSettings: 'فتح إعدادات النظام',
+      retry: 'إعادة المحاولة',
+      unavailable: 'اختصار لقطة الشاشة غير متاح. أعد المحاولة أو عطّله.',
+      errorTitle: 'خطأ في اختصار لقطة الشاشة',
+      loadFailed: 'تعذّرت قراءة حالة الاختصار. أعد المحاولة للتحقق من إعداده الحالي.',
+      saveFailed: 'تعذّر تأكيد تغيير الاختصار. أعد المحاولة للتحقق من إعداده الحالي.',
+      permissionFailed: 'تعذّر فتح إعدادات النظام. افتح الخصوصية والأمان يدويًا، ثم أعد المحاولة.',
+      captureFailed: 'تعذّر التقاط النافذة الأمامية. لم يُرفق أو يُرسل أي شيء.',
+      contextChanged: 'تغيّرت المسودة الحالية أثناء الالتقاط. لم تُرفق اللقطة أو تُرسل.'
     },
     quickEntry: {
       enabledTitle: 'الإدخال السريع',
@@ -991,6 +1060,7 @@ export const ar = defineLocale({
       setToMain: 'ضبط على الرئيسي',
       change: 'تغيير',
       autoUseMain: 'تلقائي · استخدام النموذج الرئيسي',
+      inheritMainEffort: 'وراثة · جهد النموذج الرئيسي',
       providerDefault: '(افتراضي المزوّد)',
       tasks: {
         vision: {
@@ -1020,6 +1090,18 @@ export const ar = defineLocale({
         review: {
           label: 'المراجعة',
           hint: 'وكيل المراجعة الفرعي /review'
+        },
+        triage_specifier: {
+          label: 'محدد الفرز',
+          hint: 'توضيح مواصفات كانبان'
+        },
+        kanban_decomposer: {
+          label: 'مفكك كانبان',
+          hint: 'تفكيك المهام'
+        },
+        profile_describer: {
+          label: 'واصف الملف الشخصي',
+          hint: 'أوصاف ملفات شخصية تلقائية'
         },
         curator: {
           label: 'المنسّق',
@@ -1318,6 +1400,10 @@ export const ar = defineLocale({
     restartGateway: 'إعادة تشغيل البوابة',
     openBrowser: 'فتح المتصفح',
     gatewayRestartFailed: 'فشل إعادة تشغيل البوابة.',
+    sharedGatewayRestartTitle: 'إعادة تشغيل البوابة المشتركة؟',
+    sharedGatewayRestartDescription: bots => `تتم إعادة اتصال جميع البوتات على هذا الجهاز: ${bots}`,
+    sharedGatewayRestartConfirm: 'إعادة تشغيل الكل',
+    sharedGatewayRestarted: count => `تمت إعادة تشغيل البوابة المشتركة (${count} بوت)`,
     updateHermes: 'تحديث Hermes',
     reloadWindow: 'إعادة تحميل النافذة',
     actionRunning: 'الإجراء قيد التشغيل',
@@ -1363,6 +1449,7 @@ export const ar = defineLocale({
     },
     unknown: 'غير معروف',
     hintPendingRestart: 'تحتاج إعادة تشغيل لتطبيق التغييرات.',
+    sharedListenerUrl: 'يُخدم عبر مستمع البوابة المشتركة على',
     hintGatewayStopped: 'البوابة متوقفة.',
     restartNeeded: 'تم الحفظ. أعد تشغيل بوابة المراسلة لتطبيق الإعدادات الجديدة.',
     restartNow: 'إعادة التشغيل الآن',
@@ -1421,6 +1508,8 @@ export const ar = defineLocale({
     restartToApply: 'أعد التشغيل لتطبيق التغييرات.',
     setupSaved: name => `تم حفظ إعداد ${name}`,
     restartToReconnect: 'أعد التشغيل لإعادة الاتصال.',
+    appliedLive: 'تم التطبيق على البوابة قيد التشغيل.',
+    connectingLive: 'البوابة قيد التشغيل تتصل باستخدام بيانات الاعتماد الجديدة.',
     keyCleared: key => `تم مسح ${key}`,
     setupUpdated: name => `تم تحديث إعداد ${name}`,
     failedUpdate: name => `فشل تحديث ${name}`,
@@ -1606,6 +1695,12 @@ export const ar = defineLocale({
     actions: 'إجراءات',
     color: 'اللون',
     colorFor: 'اللون',
+    openInNewWindow: 'فتح في نافذة جديدة',
+    setAsDefault: 'تعيين كافتراضي',
+    defaultProfile: 'الملف الشخصي الافتراضي',
+    defaultSet: name => `أصبح ${name} الملف الافتراضي`,
+    defaultDescription: 'يُستخدم عند فتح Hermes وللمحادثات الجديدة. تبقى الجلسات الحالية في ملفاتها الشخصية.',
+    failedSetDefault: 'تعذّر تعيين الملف الشخصي الافتراضي',
     setColor: color => `ضبط اللون ${color}`,
     autoColor: 'لون تلقائي',
     noProfiles: 'لا توجد ملفات شخصية',
@@ -1949,6 +2044,7 @@ export const ar = defineLocale({
       enter: label => `فتح ${label}`,
       reorder: label => `إعادة ترتيب ${label}`,
       toggle: (label, open) => `${open ? 'إظهار' : 'إخفاء'} جلسات ${label}`,
+      showAllCount: count => `إظهار كل الجلسات (${count})`,
       back: 'كل المشاريع'
     },
     newSessionIn: label => `جلسة جديدة في ${label}`,
@@ -2283,6 +2379,7 @@ export const ar = defineLocale({
     notAvailableTitle: 'التحديث غير متاح',
     unsupportedMessage: 'لا يمكن لهذا الإصدار من Hermes تحديث نفسه من داخل التطبيق.',
     connectionRetry: 'تحقق من اتصالك وأعد المحاولة.',
+    gitUnusable: 'لم يتمكن Hermes من تشغيل Git على هذا الجهاز، لذا لم يتمكن من التحقق من التحديثات.',
     latestBody: 'أنت تستخدم أحدث إصدار.',
     latestBodyBackend: 'الواجهة الخلفية تعمل بأحدث إصدار.',
     allSetTitle: 'كل شيء جاهز',
@@ -2590,6 +2687,8 @@ export const ar = defineLocale({
     openFolder: 'فتح مجلد',
     refreshTree: 'تحديث الشجرة',
     collapseAll: 'طي الكل',
+    showIgnored: 'إظهار الملفات المتجاهلة في git',
+    hideIgnored: 'إخفاء الملفات المتجاهلة في git',
     previewUnavailable: 'المعاينة غير متاحة',
     couldNotPreview: path => `تعذرت معاينة ${path}`,
     noProjectTitle: 'لا يوجد مشروع',
@@ -2877,6 +2976,19 @@ export const ar = defineLocale({
       copyQuery: 'نسخ الاستعلام',
       copyFile: 'نسخ الملف',
       copyPath: 'نسخ المسار',
+      failedCalls: (count: number) => `عدد استدعاءات الأدوات الفاشلة: ${count}`,
+      skillActivity: {
+        loading: 'جارٍ تحميل المهارة',
+        loaded: 'تم تحميل المهارة',
+        loadFailed: 'تعذر تحميل المهارة',
+        readingResource: 'جارٍ قراءة مورد المهارة',
+        readResource: 'تمت قراءة مورد المهارة',
+        resourceFailed: 'تعذرت قراءة مورد المهارة',
+        listing: 'جارٍ عرض المهارات',
+        listed: 'تم عرض المهارات',
+        listFailed: 'تعذر عرض المهارات',
+        unavailable: 'نتيجة المهارة غير متاحة'
+      },
       outputAlt: 'إخراج الأداة',
       rawResponse: 'الرد الخام',
       copyActivity: 'نسخ النشاط',
@@ -2888,6 +3000,7 @@ export const ar = defineLocale({
       statusError: 'خطأ',
       statusRecovered: 'تم الاسترداد',
       statusDone: 'تم',
+      resultUnavailable: 'النتيجة غير متاحة',
       memoryWriteNoted: 'تم تسجيل كتابة الذاكرة',
       actions: {
         read: 'قراءة',
@@ -3037,7 +3150,8 @@ export const ar = defineLocale({
     sudoSendFailed: 'فشل إرسال كلمة مرور sudo',
     secretSendFailed: 'فشل إرسال السر',
     sudoTitle: 'مطلوب sudo',
-    sudoDesc: 'أدخل كلمة المرور لمتابعة الأمر.',
+    sudoDesc: 'راجع الأمر قبل إدخال كلمة مرور sudo. تُرسل كلمة المرور إلى الوكيل الذي ينفّذه وتُحفظ مؤقتًا لهذه الجلسة.',
+    sudoCommandUnavailable: 'لم يقدّم هذا الوكيل الأمر. ألغِ الطلب إذا لم تتمكن من التحقق منه في المحادثة.',
     sudoPlaceholder: 'كلمة المرور',
     secretTitle: 'مطلوب سر',
     secretDesc: 'أدخل القيمة المطلوبة لمتابعة المهمة.',
@@ -3119,7 +3233,13 @@ export const ar = defineLocale({
     cwdChangeFailed: 'فشل تغيير مجلد العمل',
     cwdStagedTitle: 'تم تجهيز مجلد العمل',
     cwdStagedMessage: 'سيطبق مجلد العمل على الرسالة التالية.',
+    modelSwitchConfirmBody: 'يتطلب تبديل النموذج هذا تأكيدًا.',
+    modelSwitchConfirmLabel: 'التبديل على أي حال',
+    modelSwitchConfirmTitle: (model: string) => `التبديل إلى ${model}؟`,
+    modelSwitchConfirmTitleFallback: 'تبديل النموذج؟',
     modelSwitchFailed: 'فشل تبديل النموذج',
+    modelSwitchKeepLabel: 'الاحتفاظ بالنموذج الحالي',
+    modelSwitchStaleNotice: 'تغيّر الاختيار — لم يتم تطبيق تبديل النموذج.',
     hydrationSyncing: (profile: string) => `جارٍ مزامنة ${profile}\u2026`,
     sessionExported: 'تم تصدير الجلسة',
     sessionExportFailed: 'فشل تصدير الجلسة',
@@ -3135,6 +3255,8 @@ export const ar = defineLocale({
     imageAttach: 'إرفاق الصورة',
     imageWriteFailed: 'فشل كتابة الصورة',
     imageAttachFailed: 'فشل إرفاق الصورة',
+    pastedContent: 'محتوى ملصق',
+    pasteAttachFailed: 'تعذر إرفاق النص الملصق',
     attachImages: 'إرفاق الصور',
     clipboard: 'الحافظة',
     noClipboardImage: 'لا توجد صورة في الحافظة',
@@ -3189,6 +3311,11 @@ export const ar = defineLocale({
       'composer-mentions': {
         title: 'المرفقات والأوامر',
         text: 'اكتب @ لإحضار ملف إلى المحادثة، و / لتشغيل أمر.'
+      },
+      'local-runtime-update': {
+        title: 'يتوفر تحديث للمحرك المحلي',
+        text: 'حدّث المحرك الذي يشغّل نماذجك المحلية. قد تنقطع الطلبات المحلية الجارية.',
+        action: 'التحديث الآن'
       },
       'local-setup': {
         title: 'هذا الجهاز يمكنه تشغيل النماذج محليًا',
