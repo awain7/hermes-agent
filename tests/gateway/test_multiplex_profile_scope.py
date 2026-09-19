@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from hermes_constants import (
+    hermes_home_key, reset_hermes_home_override, set_hermes_home_override,
+)
 
 
 def _write_cfg(home, text):
@@ -87,7 +89,7 @@ class TestProviderRoutingScope:
 
 
 class TestFallbackChainScope:
-    def test_refresh_reads_active_profile_chain_without_clobbering_default(
+    def test_refresh_reads_each_profile_own_chain(
         self, tmp_path, monkeypatch,
     ):
         from gateway.run import GatewayRunner
@@ -116,11 +118,12 @@ class TestFallbackChainScope:
             reset_hermes_home_override(token)
 
         assert profile_chain == [{"provider": "gemini", "model": "gemini-2.5-flash"}]
-        # The default profile's slot must NOT have been clobbered by the
-        # secondary profile's refresh.
-        assert runner._fallback_model == default_chain
-        # And refreshing outside the scope again returns the default chain.
+        # Back outside the scope the default profile still gets ITS chain: the per-home
+        # cache, not the shared `_fallback_model` slot, is the authority. (Upstream's
+        # absorbed implementation writes that slot on every refresh; nothing in the
+        # gateway reads it -- every agent-creation site calls _refresh_fallback_model().)
         assert runner._refresh_fallback_model() == default_chain
+        assert runner._fallback_model_by_home[hermes_home_key(profile_home)] == profile_chain
 
     def test_transient_read_failure_keeps_per_profile_last_known_good(
         self, tmp_path, monkeypatch,
@@ -155,9 +158,9 @@ class TestFallbackChainScope:
         finally:
             reset_hermes_home_override(token)
 
-        # The transient failure in the secondary profile's scope must not
-        # have touched the default profile's chain either.
-        assert runner._fallback_model == [
+        # The transient failure in the secondary profile's scope must not have reached the
+        # default profile's chain either.
+        assert runner._refresh_fallback_model() == [
             {"provider": "deepseek", "model": "deepseek-v4-flash"}
         ]
 
@@ -183,4 +186,5 @@ class TestFallbackChainScope:
         finally:
             reset_hermes_home_override(token)
 
-        assert runner._fallback_model == default_chain
+        # Only that profile was cleared; the default profile still refreshes to its own chain.
+        assert runner._refresh_fallback_model() == default_chain
