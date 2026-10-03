@@ -51,6 +51,12 @@ name: Fork Python tests
 # -----------------
 # This lane is only a gate once `Fork patch-series tests` (job 1's `name:`) is
 # required by a ruleset on main. Until then it is advisory: PRs can merge red.
+#
+# Job 3, `Fork ruff enforcement (blocking)`, exists so the lint gate does not
+# depend on ci.yaml. That orchestrator fans out to ~20 jobs on paid runners
+# this fork does not have (they queue, then cancel after 24h and mail a
+# failure), so it may be disabled here; with it disabled, `Python lints / ruff
+# enforcement (blocking)` is never reported. Require this job instead.
 
 on:
   push:
@@ -207,3 +213,44 @@ jobs:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+  # -------------------------------------------------------------------------
+  # 3. The blocking lint, standing in for lint.yml's `ruff-blocking` job (which
+  #    only runs when called from ci.yaml). Same steps; the ruff pin is read
+  #    from lint.yml so an upstream bump is picked up by the next sync instead
+  #    of drifting here.
+  # -------------------------------------------------------------------------
+  ruff-blocking:
+    name: Fork ruff enforcement (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - uses: ./.github/actions/setup-pm
+        with:
+          cache-python: true
+          prune-python-cache: true
+
+      - name: Resolve the ruff pin upstream's lint lane uses
+        id: pin
+        run: |
+          set -euo pipefail
+          pin="$(grep -oE 'ruff==[0-9]+(\.[0-9]+)+' .github/workflows/lint.yml | head -n1)"
+          if [ -z "$pin" ]; then
+            echo "::error file=.github/workflows/lint.yml::no ruff==X.Y.Z pin found - did upstream change how the lint lane installs ruff?"
+            exit 1
+          fi
+          echo "spec=$pin" >> "$GITHUB_OUTPUT"
+          echo "using $pin"
+
+      - name: Install ruff
+        uses: ./.github/actions/retry
+        with:
+          command: python -m scripts.ci.python_packages ${{ steps.pin.outputs.spec }}
+
+      - name: ruff check .
+        # No --exit-zero, no || true: the exit code is the gate.
+        run: |
+          ruff check .
