@@ -250,7 +250,7 @@ class GatewayStatusCommandsMixin:
         agent = self._running_agents.get(session_key)
         is_running = agent is not None and agent is not _AGENT_PENDING_SENTINEL
         # Pending /queue follow-ups (slot + overflow).
-        adapter = self._adapter_for_source(source) if source else None  # profile-aware (fork)
+        adapter = self._delivery_adapter_for(source)  # profile-aware (fork); None-safe
         queue_depth = self._queue_depth(session_key, adapter=adapter)
         title, session_row, db_total_tokens, persisted_route = await self._status_session_db_facts(
             session_entry.session_id
