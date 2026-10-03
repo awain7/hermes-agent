@@ -564,9 +564,9 @@ class TelegramAdapter(BasePlatformAdapter):
 
     # Maximum age (seconds) of a queued inbound message before the stale-update guard drops it
     # instead of processing it (fork). connect() preserves the server-side getUpdates queue by default
-    # (drop_pending_on_cold_boot defaults to False here, so even a cold boot keeps it), so a message sent during a routine restart
-    # window (the nightly auto-update, a crash-to-relaunch gap, a reboot) is delivered instead of
-    # silently vanishing. This cutoff bounds the other side of that trade: after a *long* outage
+    # (drop_pending_on_cold_boot defaults to False here, so even a cold boot keeps it), so a message
+    # sent during a routine restart window (the nightly auto-update, a crash-to-relaunch gap, a
+    # reboot) is delivered instead of silently vanishing. This cutoff bounds the other side of that trade: after a *long* outage
     # Telegram replays up to 24h of queue, and hours-old commands should not fire blind. Override
     # with HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE (0 disables the guard entirely).
     _PENDING_MESSAGE_MAX_AGE_S = 600.0
