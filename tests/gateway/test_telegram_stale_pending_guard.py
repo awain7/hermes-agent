@@ -1,8 +1,8 @@
 """
 Tests for the Telegram stale-pending-update guard.
 
-connect() now always preserves the server-side getUpdates queue
-(drop_pending_updates=False on cold boot too), so messages sent while the
+connect() preserves the server-side getUpdates queue by default
+(the fork defaults extra.drop_pending_on_cold_boot to false), so messages sent while the
 gateway was down — nightly auto-update restarts, crashes, reboots — are
 delivered instead of silently vanishing. The group=-1 guard
 ``_drop_stale_pending_update`` bounds the replay window instead: queued
@@ -12,6 +12,7 @@ are dropped before any group-0 handler runs.
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -65,6 +66,24 @@ def _message(age_seconds: float, *, edit_age_seconds=None, naive=False):
     if edit_age_seconds is not None:
         edit_date = now - timedelta(seconds=edit_age_seconds)
     return SimpleNamespace(date=date, edit_date=edit_date, chat=SimpleNamespace(id=42))
+
+
+def test_guard_registered_alone_in_group_minus_one_on_every_build(monkeypatch):
+    """_register_handlers is the single PTB registration site (initial connect and the
+    transient-init rebuild), so the guard has to be added there on every call, alone in
+    group -1, bound to this adapter. A merge that keeps the guard function but loses its
+    registration would otherwise pass every other test in this file."""
+    monkeypatch.setattr(
+        "plugins.platforms.telegram.adapter.TypeHandler",
+        lambda update_type, callback: ("type-handler", callback),
+    )
+    adapter = _make_adapter()
+
+    for app in (MagicMock(), MagicMock()):  # first build, then the rebuild path
+        adapter._register_handlers(app)
+        in_guard_group = [c for c in app.add_handler.call_args_list if c.kwargs.get("group") == -1]
+        assert len(in_guard_group) == 1
+        assert in_guard_group[0].args[0] == ("type-handler", adapter._drop_stale_pending_update)
 
 
 @pytest.mark.asyncio

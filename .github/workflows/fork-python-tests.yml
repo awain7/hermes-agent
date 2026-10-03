@@ -92,6 +92,7 @@ jobs:
         tests/gateway/test_gateway_platform_event_hook.py
         tests/gateway/test_keep_typing_timeout.py
         tests/gateway/test_multiplex_profile_scope.py
+        tests/gateway/test_telegram_cold_boot_queue.py
         tests/gateway/test_telegram_conflict.py
         tests/gateway/test_telegram_pending_update_probe.py
         tests/gateway/test_telegram_stale_pending_guard.py
