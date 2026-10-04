@@ -4618,6 +4618,10 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     _guard_supervised_gateway_conflict(force=force)
     _guard_existing_gateway_process_conflict(replace=replace)
     sys.path.insert(0, str(PROJECT_ROOT))
+    # (fork) A Task Scheduler launch (logon task, watchdog and update scripts) hands down BELOW_NORMAL
+    # CPU, Low I/O and memory priority 2; a saturated host then starves the loop into exit 75.
+    from gateway.process_priority import restore_normal_process_priority
+    _priority = restore_normal_process_priority()
     _apply_startup_watchdog_config()
     from hermes_cli.observability.shared_metrics_process import begin_process
     begin_process("gateway")
@@ -4664,6 +4668,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         console_window_attached=_console_window_attached, detached=_gateway_detached_env(),
         breakaway=_breakaway, absorb_windows_console_controls=_absorb,
     )
+    if _priority:  # (fork) what this life started with, for the next silent-death post-mortem
+        _exit_diag("gateway.priority", **_priority)
     _atexit.register(lambda: _exit_diag("atexit.hook", sys_exc=repr(sys.exc_info())))
 
     _respawn_storm_backoff()
