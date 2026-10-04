@@ -530,7 +530,7 @@ class GatewayAdapterLifecycleMixin:
         → running), re-bind the home channel to the CLI session_id, dispatch a synthetic event, mark
         ``completed``/``failed``."""
         from gateway.run import _async_profile_runtime_scope, _reclaim_stale, _resolve_handoff_watch_scopes
-        from gateway.run_idle_gates import off_loop_gate, profile_has_pending_handoff
+        from gateway.run_idle_gates import launch_gate_home, off_loop_gate, profile_has_pending_handoff
         await asyncio.sleep(5)  # let platforms connect before dispatching through them
         # Does _process_handoff accept the profile argument? Test stand-ins bind a one-arg callable.
         try:
@@ -601,9 +601,12 @@ class GatewayAdapterLifecycleMixin:
                 try:
                     for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
                         # Idle gate (run_idle_gates): skip the scope entry when the profile's store
-                        # holds no pending handoff. The root poll (None) is unscoped and stays cheap.
-                        if profile_home is not None and not await off_loop_gate(
-                                self, lambda home=profile_home: profile_has_pending_handoff(home)):
+                        # holds no pending handoff. The root poll (None) is unscoped and stays cheap
+                        # on a single-profile host; (fork) under multiplexing it binds the launch
+                        # scope on the loop every tick, so it is gated on the launch home's store.
+                        gate_home = profile_home if profile_home is not None else launch_gate_home()
+                        if gate_home is not None and not await off_loop_gate(
+                                self, lambda home=gate_home: profile_has_pending_handoff(home)):
                             continue
                         async with _scope(profile_home):
                             await _tick(profile_name)
