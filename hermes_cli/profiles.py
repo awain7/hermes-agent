@@ -2116,21 +2116,49 @@ def _retarget_active_profile(old: str, new: str, message: str) -> None:
             print(message)
 
 
+# (fork) get_active_profile_name() answers, keyed by the path strings they were resolved from. A
+# lookup is otherwise up to three Path.resolve() filesystem calls, and the gateway asks on its event
+# loop (gateway_health._safe_profile, on every runtime-status transition) as well as from the
+# housekeeping and cron threads that share its GIL. Same rule as hermes_constants._HOME_KEY_CACHE:
+# only an answer resolved from a home that exists is kept, so one created later is picked up.
+_ACTIVE_PROFILE_NAME_CACHE: dict[tuple[str, str, str], str] = {}
+_ACTIVE_PROFILE_NAME_CACHE_MAX = 64  # a process sees a handful of homes; a test session sees thousands
+
+
+def reset_active_profile_name_cache() -> None:
+    """Forget every remembered profile name (for tests that move a home dir on disk)."""
+    _ACTIVE_PROFILE_NAME_CACHE.clear()
+
+
 def get_active_profile_name() -> str:
     """Profile name inferred from HERMES_HOME: ``"default"`` when unset or ``~/.hermes``, the
     name under ``~/.hermes/profiles/<name>``, ``"custom"`` for any other path."""
     from hermes_constants import get_hermes_home
-    resolved = get_hermes_home().resolve()
-    if resolved == _get_default_hermes_home().resolve():
-        return "default"
-    profiles_root = _get_profiles_root().resolve()
+    home, default, profiles_root = get_hermes_home(), _get_default_hermes_home(), _get_profiles_root()
+    key = (str(home), str(default), str(profiles_root))
+    cached = _ACTIVE_PROFILE_NAME_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
-        parts = resolved.relative_to(profiles_root).parts
-        if len(parts) == 1 and _PROFILE_ID_RE.match(parts[0]):
-            return parts[0]
-    except ValueError:
-        pass
-    return "custom"
+        resolved, on_disk = home.resolve(strict=True), True
+    except OSError:  # not on disk yet: lenient resolve, never stored
+        resolved, on_disk = home.resolve(), False
+    name = "custom"
+    if resolved == default.resolve():
+        name = "default"
+    else:
+        try:
+            parts = resolved.relative_to(profiles_root.resolve()).parts
+            if len(parts) == 1 and _PROFILE_ID_RE.match(parts[0]):
+                name = parts[0]
+        except ValueError:
+            pass
+    # A relative home resolves against the cwd, which the key does not carry.
+    if on_disk and home.is_absolute() and default.is_absolute():
+        if len(_ACTIVE_PROFILE_NAME_CACHE) >= _ACTIVE_PROFILE_NAME_CACHE_MAX:
+            _ACTIVE_PROFILE_NAME_CACHE.clear()
+        _ACTIVE_PROFILE_NAME_CACHE[key] = name
+    return name
 
 
 def current_profile_name(default: str | None = None) -> str | None:
