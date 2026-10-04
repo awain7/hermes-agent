@@ -188,3 +188,63 @@ class TestFallbackChainScope:
 
         # Only that profile was cleared; the default profile still refreshes to its own chain.
         assert runner._refresh_fallback_model() == default_chain
+
+
+def _self_calls(function) -> set:
+    """Names called directly on ``self`` inside *function* (``self.name(...)``)."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    return {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    }
+
+
+class TestForkPatchedRunnerMethodsStillResolve:
+    """An upstream merge can delete a runner method that a fork line still calls.
+
+    The text merges cleanly, every other test passes, and the first user to hit that
+    path gets an AttributeError (2026-10 sync: upstream split ``_adapter_for_source``
+    into ``_intake_adapter_for`` / ``_delivery_adapter_for`` and the fork's ``/status``
+    line kept calling the removed name). These tests read the source instead of
+    driving a full gateway, so they stay cheap enough for the required lane.
+    """
+
+    def test_methods_carrying_a_fork_marker_only_call_methods_that_exist(self):
+        import inspect
+
+        from gateway.run import GatewayRunner
+
+        checked, missing = 0, {}
+        for name in dir(GatewayRunner):
+            function = inspect.getattr_static(GatewayRunner, name)
+            function = getattr(function, "__func__", function)
+            if not inspect.isfunction(function):
+                continue
+            try:
+                source = inspect.getsource(function)
+            except (OSError, TypeError):
+                continue
+            if "(fork)" not in source:
+                continue
+            checked += 1
+            gone = sorted(c for c in _self_calls(function) if not hasattr(GatewayRunner, c))
+            if gone:
+                missing[name] = gone
+
+        assert checked, "no GatewayRunner method carries a (fork) marker any more"
+        assert not missing
+
+    def test_status_reads_the_pending_slot_through_the_profile_aware_seam(self):
+        from gateway.run import GatewayRunner
+
+        # Not ``self.adapters.get(platform)``: under multiplex that is the default
+        # profile's bot, and a named profile's pending slot lives on its own adapter.
+        assert "_delivery_adapter_for" in _self_calls(GatewayRunner._handle_status_command)

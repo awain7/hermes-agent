@@ -13,7 +13,9 @@ name: Fork Python tests
 # `e2e` job - the latter is proof this recipe works on a free runner: run
 # 33305730801 (PR #8, 2026-08-30) ran `uv sync --locked ... --extra dev` on
 # plain `ubuntu-latest` and finished `61 passed, 7 skipped in 14.36s`. What is
-# missing is the bulk suite, which is what this file adds.
+# missing is the bulk suite, which is what this file adds. (Since the 2026-10
+# sync tests.yml's `e2e` job asks for `ubuntu-latest-32-core` too, so it no
+# longer runs here either; this file is the only behavioural lane left.)
 #
 # WHY A NEW FILE INSTEAD OF EDITING tests.yml
 # -------------------------------------------
@@ -27,12 +29,13 @@ name: Fork Python tests
 #
 # SETUP PROVENANCE
 # ----------------
-# The uv / Python / dependency steps are copied from the upstream lanes that
-# already pass on this repo (tests.yml, tests-os.yml, lint.yml): actions pinned
-# by SHA, `astral-sh/setup-uv` pinned to 0.9.28 with its cache keyed on
-# pyproject.toml + uv.lock, and `uv python install 3.11` / `uv sync --locked`
-# both wrapped in the repo's own ./.github/actions/retry composite. Identical
-# extras list, so both jobs here share one warm cache entry.
+# The environment step is the one tests.yml's unit-test lane uses: the repo's
+# own ./.github/actions/setup-pm composite with the same extras list and
+# `test-environment: 'true'`. Since the 2026-10 upstream PM migration the suite
+# only runs on the PM-locked interpreter (3.14); the old `uv python install
+# 3.11` + `uv sync --locked` recipe installs nothing, because every dependency
+# in pyproject.toml is now gated on python_version >= '3.14'. Both jobs here
+# pass identical inputs, so they share one warm cache entry.
 #
 # NO xdist ON PURPOSE
 # -------------------
@@ -48,6 +51,12 @@ name: Fork Python tests
 # -----------------
 # This lane is only a gate once `Fork patch-series tests` (job 1's `name:`) is
 # required by a ruleset on main. Until then it is advisory: PRs can merge red.
+#
+# Job 3, `Fork ruff enforcement (blocking)`, exists so the lint gate does not
+# depend on ci.yaml. That orchestrator fans out to ~20 jobs on paid runners
+# this fork does not have (they queue, then cancel after 24h and mail a
+# failure), so it may be disabled here; with it disabled, `Python lints / ruff
+# enforcement (blocking)` is never reported. Require this job instead.
 
 on:
   push:
@@ -72,7 +81,9 @@ jobs:
   patch-series:
     name: Fork patch-series tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The tests themselves take ~2 minutes; the headroom is for a cold
+    # setup-pm (locked interpreter + every extra) when the cache misses.
+    timeout-minutes: 20
     env:
       # Every test file the fork owns or has modified relative to
       # upstream/main, plus the two regression tests added alongside the
@@ -92,6 +103,7 @@ jobs:
         tests/gateway/test_gateway_platform_event_hook.py
         tests/gateway/test_keep_typing_timeout.py
         tests/gateway/test_multiplex_profile_scope.py
+        tests/gateway/test_telegram_cold_boot_queue.py
         tests/gateway/test_telegram_conflict.py
         tests/gateway/test_telegram_pending_update_probe.py
         tests/gateway/test_telegram_stale_pending_guard.py
@@ -101,35 +113,17 @@ jobs:
         tests/hermes_cli/test_send_list_profile_view.py
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+      - name: Set up locked Python and test dependencies
+        # Same call as the unit-test lane in tests.yml: PM provisions the locked
+        # interpreter and an isolated test environment and exports HERMES_PYTHON,
+        # which scripts/run_tests.sh picks up.
+        uses: ./.github/actions/setup-pm
         with:
-          # Pinned for the reason tests.yml pins it: unpinned, setup-uv fetches
-          # a "latest" manifest from raw.githubusercontent.com on every job and
-          # a transient fetch failure fails the whole job.
-          version: "0.9.28"
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Set up Python 3.11
-        uses: ./.github/actions/retry
-        with:
-          command: uv python install 3.11
-
-      - name: Install dependencies
-        # Byte-identical to the extras line in tests.yml / tests-os.yml.
-        # tests/conftest.py sets HERMES_DISABLE_LAZY_INSTALLS=1, so the SDKs
-        # behind these extras must be present up front.
-        uses: ./.github/actions/retry
-        with:
-          command: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
-
-      - name: Minimize uv cache
-        run: uv cache prune --ci
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
 
       - name: Verify every selected test file still exists
         run: |
@@ -190,29 +184,17 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+      - name: Set up locked Python and test dependencies
+        # Same call as the unit-test lane in tests.yml: PM provisions the locked
+        # interpreter and an isolated test environment and exports HERMES_PYTHON,
+        # which scripts/run_tests.sh picks up.
+        uses: ./.github/actions/setup-pm
         with:
-          version: "0.9.28"
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Set up Python 3.11
-        uses: ./.github/actions/retry
-        with:
-          command: uv python install 3.11
-
-      - name: Install dependencies
-        uses: ./.github/actions/retry
-        with:
-          command: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
-
-      - name: Minimize uv cache
-        run: uv cache prune --ci
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
 
       - name: Run gateway + agent + run_agent suites
         run: |
@@ -231,3 +213,44 @@ jobs:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+  # -------------------------------------------------------------------------
+  # 3. The blocking lint, standing in for lint.yml's `ruff-blocking` job (which
+  #    only runs when called from ci.yaml). Same steps; the ruff pin is read
+  #    from lint.yml so an upstream bump is picked up by the next sync instead
+  #    of drifting here.
+  # -------------------------------------------------------------------------
+  ruff-blocking:
+    name: Fork ruff enforcement (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - uses: ./.github/actions/setup-pm
+        with:
+          cache-python: true
+          prune-python-cache: true
+
+      - name: Resolve the ruff pin upstream's lint lane uses
+        id: pin
+        run: |
+          set -euo pipefail
+          pin="$(grep -oE 'ruff==[0-9]+(\.[0-9]+)+' .github/workflows/lint.yml | head -n1)"
+          if [ -z "$pin" ]; then
+            echo "::error file=.github/workflows/lint.yml::no ruff==X.Y.Z pin found - did upstream change how the lint lane installs ruff?"
+            exit 1
+          fi
+          echo "spec=$pin" >> "$GITHUB_OUTPUT"
+          echo "using $pin"
+
+      - name: Install ruff
+        uses: ./.github/actions/retry
+        with:
+          command: python -m scripts.ci.python_packages ${{ steps.pin.outputs.spec }}
+
+      - name: ruff check .
+        # No --exit-zero, no || true: the exit code is the gate.
+        run: |
+          ruff check .
