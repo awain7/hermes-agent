@@ -160,7 +160,7 @@ class TestKeepTypingTimeoutPerTick:
         )
         try:
             await asyncio.wait_for(task, timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
             pytest.fail(
                 "_keep_typing did not stop itself after the lifetime cap — "

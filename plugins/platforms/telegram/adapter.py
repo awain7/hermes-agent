@@ -6583,7 +6583,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         if msg_date is None:
             return
         try:
-            age = (datetime.now(timezone.utc) - msg_date).total_seconds()
+            age = (datetime.now(UTC) - msg_date).total_seconds()
         except TypeError:
             return  # naive/fake datetime (tests, exotic clients): fail open
         if age <= max_age:

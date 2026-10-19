@@ -180,7 +180,7 @@ async def build_channel_directory(
     # platforms (Discord/Slack) aren't handled here: a secondary profile enabling one of those is
     # already rejected at startup (it can't bind its own port), so session-based discovery covers
     # everything multiplex actually supports.
-    profile_homes: Dict[str, Any] = {}
+    profile_homes: dict[str, Any] = {}
     if profile_adapters:
         try:
             from hermes_cli.profiles import get_profile_dir
@@ -476,7 +476,7 @@ def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:
     return next((ch.get("type") for ch in channels if ch.get("id") == chat_id), None)
 
 
-def _filter_by_profile(channels: List[Dict[str, Any]], profile: Optional[str]) -> List[Dict[str, Any]]:
+def _filter_by_profile(channels: list[dict[str, Any]], profile: Optional[str]) -> list[dict[str, Any]]:
     """Scope a channel list to one multiplex profile's own targets (fork).
 
     An entry with no ``"profile"`` key belongs to the default profile (or to a platform with no
@@ -489,7 +489,7 @@ def _filter_by_profile(channels: List[Dict[str, Any]], profile: Optional[str]) -
     return [ch for ch in channels if ch.get("profile") in (None, profile)]
 
 
-def _dedupe_channels(channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _dedupe_channels(channels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse entries that name the same target id, keeping the first (fork).
 
     Under multiplexing one DM shows up once per profile that talks to the user (Telegram keys DMs on
@@ -498,7 +498,7 @@ def _dedupe_channels(channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     listing. Entries without an ``id`` are kept as they are.
     """
     seen: set = set()
-    unique: List[Dict[str, Any]] = []
+    unique: list[dict[str, Any]] = []
     for ch in channels:
         key = ch.get("id") if isinstance(ch, dict) else None
         if key is None:
@@ -512,8 +512,8 @@ def _dedupe_channels(channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def directory_view_for_profile(
-    platforms: Optional[Dict[str, Any]], profile: Optional[str]
-) -> Dict[str, List[Dict[str, Any]]]:
+    platforms: Optional[dict[str, Any]], profile: Optional[str]
+) -> dict[str, list[dict[str, Any]]]:
     """``platforms`` scoped to *profile* with duplicate targets collapsed (fork).
 
     The view ``hermes send --list`` prints and ``--json`` emits: other multiplex profiles' tagged

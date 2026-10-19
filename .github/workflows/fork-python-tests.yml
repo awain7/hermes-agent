@@ -216,9 +216,11 @@ jobs:
 
   # -------------------------------------------------------------------------
   # 3. The blocking lint, standing in for lint.yml's `ruff-blocking` job (which
-  #    only runs when called from ci.yaml). Same steps; the ruff pin is read
-  #    from lint.yml so an upstream bump is picked up by the next sync instead
-  #    of drifting here.
+  #    only runs when called from ci.yaml). Same steps; the ruff pin comes from
+  #    the same `scripts.code_health --print-pins` command lint.yml uses (it
+  #    reads pyproject.toml), so an upstream bump is picked up by the next sync
+  #    instead of drifting here. (Until 2026-10 lint.yml spelled the pin inline
+  #    and this job grepped it from there.)
   # -------------------------------------------------------------------------
   ruff-blocking:
     name: Fork ruff enforcement (blocking)
@@ -237,9 +239,9 @@ jobs:
         id: pin
         run: |
           set -euo pipefail
-          pin="$(grep -oE 'ruff==[0-9]+(\.[0-9]+)+' .github/workflows/lint.yml | head -n1)"
-          if [ -z "$pin" ]; then
-            echo "::error file=.github/workflows/lint.yml::no ruff==X.Y.Z pin found - did upstream change how the lint lane installs ruff?"
+          pin="$(python -m scripts.code_health --print-pins)" || pin=""
+          if [[ ! "$pin" =~ ^ruff==[0-9]+(\.[0-9]+)+$ ]]; then
+            echo "::error file=.github/workflows/lint.yml::expected 'ruff==X.Y.Z' from scripts.code_health --print-pins, got '${pin}' - did upstream change how the lint lane installs ruff?"
             exit 1
           fi
           echo "spec=$pin" >> "$GITHUB_OUTPUT"
