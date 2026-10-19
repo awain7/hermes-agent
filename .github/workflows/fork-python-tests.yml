@@ -181,7 +181,12 @@ jobs:
   blast-radius:
     name: Blast-radius suite (gateway + agent + run_agent)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # ~24 min on 2026-10-04; after the 2026-10-19 sync the suite is 23,460 tests
+    # in 2,606 files and took 62 min on a 4-vCPU runner (35 cut it off at 69.7%
+    # with 0 failures). Wall clock tracks the file count (one process per file),
+    # which upstream keeps raising by splitting tests, so leave ~2x headroom.
+    # The weekly sync script waits 150 min for this check.
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -216,9 +221,11 @@ jobs:
 
   # -------------------------------------------------------------------------
   # 3. The blocking lint, standing in for lint.yml's `ruff-blocking` job (which
-  #    only runs when called from ci.yaml). Same steps; the ruff pin is read
-  #    from lint.yml so an upstream bump is picked up by the next sync instead
-  #    of drifting here.
+  #    only runs when called from ci.yaml). Same steps; the ruff pin comes from
+  #    the same `scripts.code_health --print-pins` command lint.yml uses (it
+  #    reads pyproject.toml), so an upstream bump is picked up by the next sync
+  #    instead of drifting here. (Until 2026-10 lint.yml spelled the pin inline
+  #    and this job grepped it from there.)
   # -------------------------------------------------------------------------
   ruff-blocking:
     name: Fork ruff enforcement (blocking)
@@ -237,9 +244,9 @@ jobs:
         id: pin
         run: |
           set -euo pipefail
-          pin="$(grep -oE 'ruff==[0-9]+(\.[0-9]+)+' .github/workflows/lint.yml | head -n1)"
-          if [ -z "$pin" ]; then
-            echo "::error file=.github/workflows/lint.yml::no ruff==X.Y.Z pin found - did upstream change how the lint lane installs ruff?"
+          pin="$(python -m scripts.code_health --print-pins)" || pin=""
+          if [[ ! "$pin" =~ ^ruff==[0-9]+(\.[0-9]+)+$ ]]; then
+            echo "::error file=.github/workflows/lint.yml::expected 'ruff==X.Y.Z' from scripts.code_health --print-pins, got '${pin}' - did upstream change how the lint lane installs ruff?"
             exit 1
           fi
           echo "spec=$pin" >> "$GITHUB_OUTPUT"

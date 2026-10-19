@@ -45,7 +45,7 @@ def directory(monkeypatch):
 
 
 def _set_profile(monkeypatch, name):
-    import hermes_cli.profiles as profiles
+    from hermes_cli import profiles
 
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: name)
 

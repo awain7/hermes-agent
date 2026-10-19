@@ -10,7 +10,7 @@ messages older than HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE (default 600s)
 are dropped before any group-0 handler runs.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -58,7 +58,7 @@ def _update(message=None, callback_query=None):
 
 
 def _message(age_seconds: float, *, edit_age_seconds=None, naive=False):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     date = now - timedelta(seconds=age_seconds)
     if naive:
         date = date.replace(tzinfo=None)
