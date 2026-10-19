@@ -181,10 +181,12 @@ jobs:
   blast-radius:
     name: Blast-radius suite (gateway + agent + run_agent)
     runs-on: ubuntu-latest
-    # ~24 min in 2026-10-04; after the 2026-10-19 sync the suite is ~18,250 tests
-    # in ~2,600 files and needs ~50 min on a 4-vCPU runner (35 cut it off at
-    # 69.7%, 0 failures). Headroom for upstream's steady test growth.
-    timeout-minutes: 75
+    # ~24 min on 2026-10-04; after the 2026-10-19 sync the suite is 23,460 tests
+    # in 2,606 files and took 62 min on a 4-vCPU runner (35 cut it off at 69.7%
+    # with 0 failures). Wall clock tracks the file count (one process per file),
+    # which upstream keeps raising by splitting tests, so leave ~2x headroom.
+    # The weekly sync script waits 150 min for this check.
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
