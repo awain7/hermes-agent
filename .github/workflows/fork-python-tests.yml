@@ -200,7 +200,9 @@ jobs:
         # which scripts/run_tests.sh picks up.
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          # Same list as the unit-test lane in tests.yml (which added "keychain" for the keyring-backed
+          # vault key storage; without it tests/agent/test_vault_key_storage.py fails at import).
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
           prune-python-cache: true
 
