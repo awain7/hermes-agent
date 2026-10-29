@@ -57,6 +57,20 @@ def profile_has_pending_handoff(profile_home: Path) -> bool:
     return _gate(profile_home, lambda db: db.has_pending_handoffs())
 
 
+def launch_gate_home() -> Optional[Path]:
+    """(fork) Home whose store gates the ROOT poll: the launch home once this process multiplexes.
+
+    A single-profile host's root poll is unscoped (``nullcontext``) and needs no gate: None. Under
+    multiplexing it binds the launch profile's scope, and ``launch_profile_runtime_scope`` re-parses
+    ``.env`` and rebuilds the terminal policy ON the event loop — so an idle launch store skips that
+    entry exactly like any other profile's."""
+    from agent.secret_scope import is_multiplex_active
+    if not is_multiplex_active():
+        return None
+    from hermes_constants import get_process_hermes_home
+    return get_process_hermes_home()
+
+
 async def off_loop_gate(runner: object, probe: Callable[[], bool]) -> bool:
     """Run a sync gate through the runner's executor hop. Runners without one (bare test stand-ins
     for the handoff watcher) keep the historical always-enter behaviour."""
