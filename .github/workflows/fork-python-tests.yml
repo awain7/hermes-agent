@@ -170,10 +170,13 @@ jobs:
   #    gateway/platforms/api_server.py, gateway/slash_commands.py,
   #    plugins/platforms/telegram/adapter.py, agent/conversation_loop.py,
   #    agent/system_prompt.py, agent/agent_init.py and run_agent.py.
-  #    tests/gateway/ + tests/agent/ + tests/run_agent/ are those modules' test
-  #    homes. tests/run_agent/ matters specifically because it is where
-  #    _stored_prompt_matches_runtime() is regression-tested
-  #    (test_compression_persistence.py) - the guard the profile stamps feed.
+  #    tests/gateway/ + tests/agent/ are those modules' test homes. tests/agent/
+  #    matters specifically because it is where _stored_prompt_matches_runtime()
+  #    is regression-tested (test_compression_persistence.py) - the guard the
+  #    profile stamps feed. (Upstream folded tests/run_agent/ into tests/agent/
+  #    on 2026-09-13, d10bb2ab6f; the runner only started failing on the missing
+  #    path with 97253cc182, so the job name still says run_agent - it is kept
+  #    because the weekly sync script waits for this check by name.)
   #    This is the job that catches a botched merge-conflict resolution in
   #    gateway/run.py, which job 1 (asserting only the fork's ADDED behaviour)
   #    would happily pass through.
@@ -197,7 +200,9 @@ jobs:
         # which scripts/run_tests.sh picks up.
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          # Same list as the unit-test lane in tests.yml (which added "keychain" for the keyring-backed
+          # vault key storage; without it tests/agent/test_vault_key_storage.py fails at import).
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
           prune-python-cache: true
 
@@ -213,7 +218,7 @@ jobs:
           # attempt, so a real regression cannot be laundered green; a
           # pass-on-retry is reported as FLAKY.
           export HERMES_TEST_FILE_RETRIES=2
-          scripts/run_tests.sh tests/gateway/ tests/agent/ tests/run_agent/ -- --tb=short
+          scripts/run_tests.sh tests/gateway/ tests/agent/ -- --tb=short
         env:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
