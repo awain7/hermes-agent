@@ -4,10 +4,12 @@ Tests for the Telegram stale-pending-update guard.
 connect() preserves the server-side getUpdates queue by default
 (the fork defaults extra.drop_pending_on_cold_boot to false), so messages sent while the
 gateway was down — nightly auto-update restarts, crashes, reboots — are
-delivered instead of silently vanishing. The group=-1 guard
+delivered instead of silently vanishing. The first-group guard
 ``_drop_stale_pending_update`` bounds the replay window instead: queued
 messages older than HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE (default 600s)
-are dropped before any group-0 handler runs.
+are dropped before any core or plugin handler runs. The real-PTB path
+(group order, admission receipt) is in
+tests/plugins/test_telegram_stale_pending_admission.py.
 """
 
 from datetime import datetime, timedelta, UTC
@@ -68,22 +70,32 @@ def _message(age_seconds: float, *, edit_age_seconds=None, naive=False):
     return SimpleNamespace(date=date, edit_date=edit_date, chat=SimpleNamespace(id=42))
 
 
-def test_guard_registered_alone_in_group_minus_one_on_every_build(monkeypatch):
+def test_guard_registered_alone_in_its_own_first_group_on_every_build(monkeypatch):
     """_register_handlers is the single PTB registration site (initial connect and the
     transient-init rebuild), so the guard has to be added there on every call, alone in
-    group -1, bound to this adapter. A merge that keeps the guard function but loses its
-    registration would otherwise pass every other test in this file."""
+    its own group, bound to this adapter, blocking. A merge that keeps the guard function
+    but loses its registration would otherwise pass every other test in this file.
+
+    The group must sort below every other group (PTB runs groups in ascending order) and
+    must not be -1: PTB runs only the first matching handler per group and the guard
+    matches every update, so sharing the usual "before core" plugin slot would starve
+    whatever a plugin registers there."""
     monkeypatch.setattr(
         "plugins.platforms.telegram.adapter.TypeHandler",
-        lambda update_type, callback: ("type-handler", callback),
+        lambda update_type, callback, block=None: ("type-handler", callback, block),
     )
     adapter = _make_adapter()
+    guard_group = adapter._STALE_PENDING_GUARD_GROUP
+    assert guard_group < -1
 
     for app in (MagicMock(), MagicMock()):  # first build, then the rebuild path
         adapter._register_handlers(app)
-        in_guard_group = [c for c in app.add_handler.call_args_list if c.kwargs.get("group") == -1]
+        calls = app.add_handler.call_args_list
+        in_guard_group = [c for c in calls if c.kwargs.get("group") == guard_group]
         assert len(in_guard_group) == 1
-        assert in_guard_group[0].args[0] == ("type-handler", adapter._drop_stale_pending_update)
+        assert in_guard_group[0].args[0] == ("type-handler", adapter._drop_stale_pending_update, True)
+        other_groups = [c.kwargs.get("group", 0) for c in calls if c.kwargs.get("group") != guard_group]
+        assert other_groups and min(other_groups) > guard_group
 
 
 @pytest.mark.asyncio
@@ -97,6 +109,29 @@ async def test_stale_message_dropped():
     adapter = _make_adapter()
     with pytest.raises(_HandlerStop):
         await adapter._drop_stale_pending_update(_update(_message(3600)), None)
+
+
+@pytest.mark.asyncio
+async def test_only_a_drop_accepts_the_admission_claim():
+    """A drop is final: accepting the update's admission claim is what makes
+    TelegramApplication receipt it, so a redelivery cannot replay it later. A message
+    that passes must leave the claim to the handlers that actually serve it."""
+    from contextvars import ContextVar
+
+    adapter = _make_adapter()
+    adapter._update_admission = ContextVar("claim", default=None)
+    for age, dropped in ((5, False), (3600, True)):
+        claim = SimpleNamespace(accepted=False)
+        token = adapter._update_admission.set(claim)
+        try:
+            if dropped:
+                with pytest.raises(_HandlerStop):
+                    await adapter._drop_stale_pending_update(_update(_message(age)), None)
+            else:
+                await adapter._drop_stale_pending_update(_update(_message(age)), None)
+        finally:
+            adapter._update_admission.reset(token)
+        assert claim.accepted is dropped
 
 
 @pytest.mark.asyncio

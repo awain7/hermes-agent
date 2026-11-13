@@ -501,6 +501,11 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
     # Telegram replays up to 24h of queue, and hours-old commands should not fire blind. Override
     # with HERMES_TELEGRAM_PENDING_MESSAGE_MAX_AGE (0 disables the guard entirely).
     _PENDING_MESSAGE_MAX_AGE_S = 600.0
+    # PTB handler group of that guard (fork): its own, below every group core or any known plugin
+    # uses (a plugin must not register lower; PTB accepts any int). PTB runs only the
+    # first matching handler per group and the guard matches every update, so sharing group -1 (the
+    # usual "before core" plugin slot) would silently starve every plugin handler registered there.
+    _STALE_PENDING_GUARD_GROUP = -(2**31)
 
     @staticmethod
     def _env_float_clamped(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
@@ -651,7 +656,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         # Cold-boot queue: answer messages sent while the gateway was off (default False; Telegram holds
         # them up to 24 h, update receipts dedupe ones already handled). extra.drop_pending_on_cold_boot:
         # true discards that backlog on boot instead. Watcher reconnects always preserve the queue.
-        # Fork: the stale-update guard (_drop_stale_pending_update, group -1) bounds that replay by age,
+        # Fork: the stale-update guard (_drop_stale_pending_update) bounds that replay by age,
         # so a long outage does not fire hours-old commands blind.
         self._drop_pending_on_cold_boot: bool = self._coerce_bool_extra("drop_pending_on_cold_boot", False)
         self._dm_topics_config: list[dict[str, Any]] = extra.get("dm_topics", [])
@@ -2214,9 +2219,10 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
 
         ``received`` and ``dispatched`` count the same population (every fetched update reaches the
         group-99 catch-all: no error handler is registered, and TelegramApplication.process_update
-        counts dispatch before any handler group runs, so the fork's group -1 stale-update guard
-        raising ApplicationHandlerStop does not skew it), so a backlog with no dispatch progress across ``_INGRESS_DISPATCH_STALL_HEARTBEATS`` heartbeats
-        is a wedged dispatcher at any traffic rate. Hands the adapter to the supervisor for a rebuild once
+        counts dispatch before any handler group runs, so the fork's stale-update guard (alone in
+        ``_STALE_PENDING_GUARD_GROUP``) raising ApplicationHandlerStop does not skew it), so a backlog
+        with no dispatch progress across ``_INGRESS_DISPATCH_STALL_HEARTBEATS`` heartbeats is a wedged
+        dispatcher at any traffic rate. Hands the adapter to the supervisor for a rebuild once
         per stall (``_PollingStallError``: an in-place restart keeps the wedged dispatcher); re-arms on progress.
         """
         if self._webhook_mode or self._teardown_started or self.has_fatal_error or self._recovery_in_flight():
@@ -2865,13 +2871,15 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         app.add_handler(InlineQueryHandler(self._handle_inline_query))
         # gateway_platform_event observer: group 99 observes alongside, never displaces, core handlers.
         app.add_handler(TypeHandler(Update, self._on_platform_update), group=99)
-        # Stale-update guard (fork), group -1 so it runs before every handler above: connect() preserves
-        # Telegram's server-side queue across restarts (drop_pending_on_cold_boot defaults to False here),
-        # and this guard bounds the replay window by dropping messages older than the cutoff. Fresh
-        # messages and non-message updates (callbacks, edits) pass through. Skipped under stub
-        # telegram.ext modules. Registered before the core-handler snapshot below so it counts as core.
+        # Stale-update guard (fork), alone in the lowest group so it runs before every core and plugin
+        # handler: connect() preserves Telegram's server-side queue across restarts
+        # (drop_pending_on_cold_boot defaults to False here), and this guard bounds the replay window by
+        # dropping messages older than the cutoff. Fresh messages and non-message updates (callbacks,
+        # edits) pass through. block=True: its ApplicationHandlerStop must hold even under bot-level
+        # Defaults(block=False). Skipped under stub telegram.ext modules.
         if TypeHandler is not None and TypeHandler is not Any:
-            app.add_handler(TypeHandler(Update, self._drop_stale_pending_update), group=-1)
+            app.add_handler(TypeHandler(Update, self._drop_stale_pending_update, block=True),
+                            group=self._STALE_PENDING_GUARD_GROUP)
         # Everything appended above is core; a late plugin re-wire must land BEFORE these (#87770).
         if isinstance(table, dict):
             self._core_handler_ids = {id(h) for g, hs in table.items() for h in hs[core_before.get(g, 0):]}
@@ -6067,14 +6075,18 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
     _effective_update_message = staticmethod(effective_update_message)
 
     async def _drop_stale_pending_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """group=-1 guard (fork): drop queued inbound messages older than the cutoff.
+        """First-group guard (fork): drop queued inbound messages older than the cutoff.
 
-        Runs before every group-0 handler. connect() preserves the server-side getUpdates queue across
-        restarts, so this is the only thing standing between a long outage and a blind replay of
+        Runs before every core and plugin handler. connect() preserves the server-side getUpdates queue
+        across restarts, so this is the only thing standing between a long outage and a blind replay of
         hours-old commands. Scope is deliberately narrow: callback queries pass through untouched
         (pressing a button on an old message is a legitimate, *current* action); edited messages are
         aged by ``edit_date`` (the edit is the fresh intent); anything without a usable timestamp
         passes through, because dropping real traffic is the worse error.
+
+        A drop is final, like an auth refusal: accepting the admission claim makes TelegramApplication
+        receipt the update, so a redelivery (ack lost to a crash) cannot replay it after a cutoff change
+        or clock correction, by which time the user has likely re-sent it.
         """
         max_age = self._pending_message_max_age_s
         if max_age <= 0:
@@ -6096,6 +6108,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         logger.info(
             "[%s] Dropping stale queued message from chat %s (age %.0fs > %.0fs cutoff)",
             self.name, getattr(getattr(message, "chat", None), "id", "?"), age, max_age)
+        self._accept_update()
         raise ApplicationHandlerStop
 
     def _log_blocked_user(self, msg, *, level=logging.WARNING, what: str = "unauthorized user") -> None:
