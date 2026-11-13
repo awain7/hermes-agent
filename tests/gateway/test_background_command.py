@@ -155,7 +155,6 @@ class TestRunBackgroundTask:
         mock_agent_instance.shutdown_memory_provider.assert_called_once()
         mock_agent_instance.close.assert_called_once()
 
-
     @pytest.mark.asyncio
     async def test_background_agent_is_stamped_with_source_profile(self):
         """A /bg task under a named multiplex profile stamps that profile.
@@ -187,7 +186,9 @@ class TestRunBackgroundTask:
             profile="travel",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),              patch("gateway.run._load_gateway_config", return_value={}),              patch("run_agent.AIAgent") as MockAgent:
+        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
+             patch("gateway.run._load_gateway_config", return_value={}), \
+             patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
             mock_agent_instance.close = MagicMock()
@@ -217,7 +218,9 @@ class TestRunBackgroundTask:
             user_name="testuser",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),              patch("gateway.run._load_gateway_config", return_value={}),              patch("run_agent.AIAgent") as MockAgent:
+        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
+             patch("gateway.run._load_gateway_config", return_value={}), \
+             patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
             mock_agent_instance.close = MagicMock()
@@ -230,6 +233,24 @@ class TestRunBackgroundTask:
 
         assert MockAgent.call_args.kwargs["profile"] is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("surface, switch", [(True, True), (True, False), (False, False)])
+    async def test_task_takes_its_chats_daybreak_verdicts(self, surface, switch):
+        """A /bg agent is built outside the turn wiring; it carries its own chat's owner verdict and switch."""
+        runner = _make_runner()
+        adapter = AsyncMock()
+        adapter.extract_media = lambda text: ([], text)
+        adapter.extract_images = lambda text: ([], text)
+        runner.adapters[Platform.TELEGRAM] = adapter
+        runner._daybreak_surface = lambda source: surface
+        runner._load_daybreak = lambda source: switch
+        agent = MagicMock()
+        agent.run_conversation.return_value = {"final_response": "done", "messages": []}
+        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
+             patch("gateway.run._load_gateway_config", return_value={}), \
+             patch("run_agent.AIAgent", return_value=agent):
+            await runner._run_background_task("say hello", _make_event().source, "bg_test")
+        assert (agent.daybreak_surface, agent.daybreak) == (surface, switch)
 
 # ---------------------------------------------------------------------------
 # /bg in help and known_commands

@@ -111,6 +111,8 @@ jobs:
         tests/gateway/test_channel_directory_profile_copies.py
         tests/hermes_cli/test_dashboard_procs_cim_fallback.py
         tests/hermes_cli/test_send_list_profile_view.py
+        tests/plugins/test_telegram_stale_pending_admission.py
+        tests/plugins/test_telegram_update_admission.py
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -118,12 +120,20 @@ jobs:
       - name: Set up locked Python and test dependencies
         # Same call as the unit-test lane in tests.yml: PM provisions the locked
         # interpreter and an isolated test environment and exports HERMES_PYTHON,
-        # which scripts/run_tests.sh picks up.
+        # which scripts/run_tests.sh picks up. `telegram`: the tests/plugins files
+        # drive real python-telegram-bot dispatch and importorskip it, so without
+        # the extra they would pass by skipping (how 12 admission failures went
+        # unseen from 64446e4470 until the 2026-11-13 sync).
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "telegram"]'
           test-environment: 'true'
           prune-python-cache: true
+
+      - name: Require python-telegram-bot in the test environment
+        run: |
+          set -euo pipefail
+          "${HERMES_PYTHON:?setup-pm did not export HERMES_PYTHON}" -c 'import telegram; print("python-telegram-bot", telegram.__version__)'
 
       - name: Verify every selected test file still exists
         run: |
