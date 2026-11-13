@@ -129,6 +129,9 @@ async def connected(monkeypatch, *, extra=None, bot_id=111, is_reconnect=False):
     monkeypatch.setattr(adapter, "_start_polling_mode", AsyncMock())
     monkeypatch.setattr(adapter, "_start_post_connect_housekeeping", lambda: None)
     monkeypatch.setattr(adapter, "_restart_task_attr", lambda name, coroutine: coroutine.close())
+    monkeypatch.setattr(adapter, "_arm_polling_heartbeat", lambda: None)  # fork: connect() arms it here
+    # Fork: fixtures carry fixed message dates; keep the stale-update guard from aging them out.
+    adapter._pending_message_max_age_s = 0.0
     monkeypatch.setattr(adapter, "_set_status_indicator", AsyncMock())
     delivered = []
     adapter._message_handler = AsyncMock()

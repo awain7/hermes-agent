@@ -92,6 +92,45 @@ def test_no_profile_adapters_writes_no_copies(tmp_path):
     assert not (tmp_path / "profiles").exists()
 
 
+class _TopicAdapter:
+    """The default bot declares a configured DM topic (upstream ``configured_channels()``)."""
+
+    def configured_channels(self):
+        return [{"id": "222:9", "name": "Reports", "type": "dm", "thread_id": "9"}]
+
+
+def _topic_sessions(platform_name, home_override=None):
+    return [{"id": "111", "name": "Reports", "type": "dm"}] if home_override is not None else []
+
+
+def test_default_bot_configured_topic_stays_out_of_secondary_views(tmp_path):
+    """A DM topic's thread_id exists only in its own bot's chat: a secondary profile's bare-name
+    lookup must find its own target, never the default bot's configured topic."""
+    launch_home = tmp_path / "root"
+    launch_home.mkdir()
+    work_home = tmp_path / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    with patch.object(cd, "DIRECTORY_PATH", launch_home / "channel_directory.json"), patch.object(
+        cd, "CHANNEL_ALIASES_PATH", launch_home / "channel_aliases.json"
+    ), patch.object(cd, "_build_from_sessions", side_effect=_topic_sessions), patch(
+        "hermes_cli.profiles.get_profile_dir", return_value=work_home
+    ):
+        directory = asyncio.run(
+            cd.build_channel_directory(
+                {Platform.TELEGRAM: _TopicAdapter()},
+                {"work": {Platform.TELEGRAM: _Adapter()}},
+            )
+        )
+        assert [(e["id"], e.get("profile")) for e in directory["platforms"]["telegram"]] == [
+            ("222:9", "default"),
+            ("111", "work"),
+        ]
+        assert cd.resolve_channel_name("telegram", "Reports", "work") == "111"
+        assert cd.resolve_channel_name("telegram", "Reports", "default") == "222:9"
+    own = json.loads((work_home / "channel_directory.json").read_text(encoding="utf-8"))
+    assert [e["id"] for e in own["platforms"]["telegram"]] == ["111"]
+
+
 def test_display_lists_each_target_once_and_hides_other_profiles():
     dm = {"id": "8815498158", "name": "Tiat-uí Khóo", "type": "dm"}
     platforms = {

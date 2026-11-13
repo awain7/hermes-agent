@@ -181,7 +181,16 @@ async def build_channel_directory(
     # secondary profiles' tagged entries are appended: its id-collision and label-clash rules then
     # see exactly the default profile's (untagged) namespace and never drop a default configured
     # target, or rename a secondary profile's entry, because of another bot's chat.
+    _discovered_ids = {id(e) for chans in platforms.values() for e in chans}
     _merge_configured_channels(adapters, platforms)
+    if profile_adapters:
+        # Configured targets are bot-specific (a DM topic's thread_id exists only in that bot's chat
+        # with the user): tag the default bot's as "default" so a secondary profile's bare-name lookup
+        # never resolves to one and sends it through the wrong bot.
+        for chans in platforms.values():
+            for e in chans:
+                if id(e) not in _discovered_ids:
+                    e["profile"] = "default"
     # Secondary multiplex profiles (fork): each has its own HERMES_HOME (and thus its own
     # state.db / sessions.json), invisible to the default-profile-only scan above. Adapter-enumerable
     # platforms (Discord/Slack) aren't handled here: a secondary profile enabling one of those is
@@ -533,7 +542,9 @@ def _filter_by_profile(channels: list[dict[str, Any]], profile: Optional[str]) -
     """Scope a channel list to one multiplex profile's own targets (fork).
 
     An entry with no ``"profile"`` key belongs to the default profile (or to a platform with no
-    per-profile concept, like Discord/Slack); those never get tagged, see ``build_channel_directory``.
+    per-profile concept, like Discord/Slack) and is shared with every view. The default bot's
+    configured targets are tagged ``"default"`` instead, because they only work through that bot;
+    see ``build_channel_directory``.
     A falsy *profile* (non-multiplex gateways, or no session-profile context) returns every entry
     unfiltered, identical to pre-multiplex behavior.
     """

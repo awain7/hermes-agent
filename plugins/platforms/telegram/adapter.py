@@ -2063,14 +2063,16 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         """Resurrect the heartbeat if it died while the adapter is still live.
 
         Deliberate exits stay final: cancellation (disconnect/reconnect paths cancel the task before
-        replacing or dropping it) and exits while the adapter has a fatal error or is no longer
-        connected. Anything else (an unexpected exception, or a defensive ``return`` inside the loop
+        replacing or dropping it) and exits while the adapter has a fatal error, is no longer
+        connected, or has fenced polling for teardown. Anything else (an unexpected exception, or a defensive ``return`` inside the loop
         while polling is still supposed to be running) gets logged loudly and the loop is re-armed,
         rate-limited to ``_HEARTBEAT_RESTART_LIMIT`` restarts per ``_HEARTBEAT_RESTART_WINDOW_S``.
         """
         if task.cancelled():
             return
-        if self._webhook_mode or self.has_fatal_error or not self.is_connected:
+        # stop_inbound() (gateway drain) fences polling while egress stays connected; the loop's
+        # teardown return is deliberate then, as after disconnect(). Only connect() reopens polling.
+        if self._webhook_mode or self.has_fatal_error or not self.is_connected or self._teardown_started:
             return
         exc = task.exception()
         now = time.monotonic()
@@ -2211,8 +2213,9 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         """Escalate fetched updates PTB's dispatcher is not handing to handlers (#102260, #130407).
 
         ``received`` and ``dispatched`` count the same population (every fetched update reaches the
-        group-99 catch-all: no handler raises ApplicationHandlerStop, no error handler is registered),
-        so a backlog with no dispatch progress across ``_INGRESS_DISPATCH_STALL_HEARTBEATS`` heartbeats
+        group-99 catch-all: no error handler is registered, and TelegramApplication.process_update
+        counts dispatch before any handler group runs, so the fork's group -1 stale-update guard
+        raising ApplicationHandlerStop does not skew it), so a backlog with no dispatch progress across ``_INGRESS_DISPATCH_STALL_HEARTBEATS`` heartbeats
         is a wedged dispatcher at any traffic rate. Hands the adapter to the supervisor for a rebuild once
         per stall (``_PollingStallError``: an in-place restart keeps the wedged dispatcher); re-arms on progress.
         """

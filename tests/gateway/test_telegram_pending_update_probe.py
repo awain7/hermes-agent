@@ -331,6 +331,21 @@ async def test_heartbeat_not_resurrected_with_fatal_error():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_not_resurrected_after_inbound_stop():
+    """Gateway drain (stop_inbound) fences polling while egress stays connected; the loop's
+    teardown return is deliberate and must not be resurrected."""
+    adapter = _live_polling_adapter()
+    await adapter.stop_inbound()
+    assert adapter.is_connected and adapter._teardown_started
+    dead = await _finished_task()  # the loop's clean teardown return
+
+    adapter._on_heartbeat_task_done(dead)
+
+    assert adapter._polling_heartbeat_task is None
+    assert not getattr(adapter, "_heartbeat_restart_times", [])
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_resurrection_rate_limited():
     """More than _HEARTBEAT_RESTART_LIMIT deaths inside the window gives up
     (the external watchdog covers wedge detection from outside the process)."""
