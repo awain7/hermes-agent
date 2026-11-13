@@ -137,7 +137,8 @@ async def build_channel_directory(
 
     ``profile_adapters`` (fork) is the multiplex gateway's ``self._profile_adapters`` (profile name
     -> {Platform: adapter}) under ``gateway.multiplex_profiles: true``. Session-discovered entries
-    (the only kind Telegram-style platforms produce) are tagged with a ``"profile"`` key for every
+    (and the configured targets of the profile's own adapters, ``configured_channels()``: the kinds
+    Telegram-style platforms produce) are tagged with a ``"profile"`` key for every
     secondary profile so a DM chat_id that collides across profiles (Telegram DMs key on the *user's*
     id, identical no matter which bot they talk to) doesn't collapse into one ambiguous entry.
     Entries with no ``"profile"`` key belong to the default profile or to a platform with no profile
@@ -175,11 +176,19 @@ async def build_channel_directory(
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.loaded_entries():
             await _discover(entry.name)
+    # Upstream merges the configured targets (``configured_channels()``) of the connected adapters.
+    # Under multiplexing ``adapters`` is the default profile's map only, so this runs BEFORE the
+    # secondary profiles' tagged entries are appended: its id-collision and label-clash rules then
+    # see exactly the default profile's (untagged) namespace and never drop a default configured
+    # target, or rename a secondary profile's entry, because of another bot's chat.
+    _merge_configured_channels(adapters, platforms)
     # Secondary multiplex profiles (fork): each has its own HERMES_HOME (and thus its own
     # state.db / sessions.json), invisible to the default-profile-only scan above. Adapter-enumerable
     # platforms (Discord/Slack) aren't handled here: a secondary profile enabling one of those is
     # already rejected at startup (it can't bind its own port), so session-based discovery covers
-    # everything multiplex actually supports.
+    # everything multiplex actually supports. Each profile's own adapters' configured targets (e.g.
+    # its bot's Telegram ``dm_topics``) are merged into that profile's discovered entries before
+    # tagging, so upstream's merge rules apply within the profile's own namespace.
     profile_homes: dict[str, Any] = {}
     if profile_adapters:
         try:
@@ -192,11 +201,19 @@ async def build_channel_directory(
             except Exception:
                 profile_home = None
             profile_homes[profile_name] = profile_home
+            profile_platforms: dict[str, list[dict[str, Any]]] = {}
             for platform in plat_adapters.keys():
                 plat_name = platform.value if hasattr(platform, "value") else str(platform)
                 if plat_name in _SKIP_SESSION_DISCOVERY:
                     continue
                 entries = await asyncio.to_thread(_build_from_sessions, plat_name, home_override=profile_home)
+                profile_platforms.setdefault(plat_name, []).extend(entries)
+            try:
+                _merge_configured_channels(plat_adapters, profile_platforms)
+            except Exception as e:
+                logger.warning("Channel directory: configured channels for profile '%s' failed: %s",
+                               profile_name, e)
+            for plat_name, entries in profile_platforms.items():
                 for entry in entries:
                     entry["profile"] = profile_name
                 platforms.setdefault(plat_name, []).extend(entries)
@@ -225,6 +242,42 @@ async def build_channel_directory(
         except Exception as e:
             logger.warning("Channel directory: failed to write profile '%s' copy: %s", profile_name, e)
     return directory
+
+
+def _merge_configured_channels(adapters: dict[Any, Any], platforms: dict[str, list[dict[str, Any]]]) -> None:
+    """Add the targets an adapter's own config declares (``configured_channels()``, e.g. Telegram
+    ``extra.dm_topics``) after discovery: session history alone drops them once their sessions are
+    pruned (#52629). Discovered entries win on an id collision; label clashes are id-qualified."""
+    for platform, adapter in adapters.items():
+        configured = getattr(adapter, "configured_channels", None)
+        if not callable(configured):
+            continue
+        try:
+            entries = _normalize_adapter_channels(configured())
+        except Exception as e:
+            logger.warning("Channel directory: configured channels for %s failed: %s", platform.value, e, exc_info=True)
+            continue
+        known = platforms.setdefault(platform.value, [])
+        seen = {entry.get("id") for entry in known}
+        added = [entry for entry in entries if entry["id"] not in seen]
+        known.extend(added)
+        _qualify_label_clashes(platform.value, known, {id(entry) for entry in added})
+
+
+def _qualify_label_clashes(platform_name: str, entries: list[dict[str, Any]], added: set[int]) -> None:
+    """Prefix the id onto every entry whose label resolves (``resolve_channel_name`` step 1) like a
+    different target's, when one of them is a just-merged configured entry: the bare name then
+    resolves to nothing rather than to whichever chat was listed first. Discovered-only clashes keep
+    their labels."""
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        labels = {_normalize_channel_query(entry["name"]), _normalize_channel_query(_channel_target_name(platform_name, entry))}
+        for key in labels:
+            by_key.setdefault(key, []).append(entry)
+    clashing = {id(e): e for group in by_key.values()
+                if len({e["id"] for e in group}) > 1 and any(id(e) in added for e in group) for e in group}
+    for entry in clashing.values():
+        entry["name"] = f"{entry['id']} / {entry['name']}"
 
 
 def _build_discord(adapter) -> list[dict[str, str]]:

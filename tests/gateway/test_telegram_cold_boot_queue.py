@@ -1,13 +1,11 @@
 """Cold-boot pending-queue knob for the Telegram adapter.
 
-Contract: a cold boot drops Telegram's server-side pending updates unless
-``extra.drop_pending_on_cold_boot`` is false; a watcher reconnect always
-preserves them. Conflict recovery is a separate path and is not covered here.
+Contract: a cold boot keeps Telegram's server-side pending updates (the
+backlog is answered) unless ``extra.drop_pending_on_cold_boot`` is true; a
+watcher reconnect always preserves them. Conflict recovery is a separate path and is not covered here.
 
-Fork: the knob DEFAULTS to false (upstream: true), so an unconfigured adapter
-preserves the queue on a cold boot and the stale-update guard
-(tests/gateway/test_telegram_stale_pending_guard.py) bounds the replay. The
-drop path is still covered below by opting in explicitly.
+Fork: the stale-update guard (tests/gateway/test_telegram_stale_pending_guard.py)
+bounds the preserved replay by age.
 """
 
 import logging
@@ -40,8 +38,8 @@ async def _capture_drop_pending(adapter: TelegramAdapter, *, is_reconnect: bool)
 
 
 @pytest.mark.asyncio
-async def test_fork_default_preserves_queue_on_cold_boot():
-    """Fork default (no extra): cold boot AND reconnect both preserve the queue."""
+async def test_cold_boot_preserves_queue_by_default():
+    """Default config: cold boot and reconnect both keep the backlog (#143123)."""
     adapter = _make_adapter()
     assert adapter._drop_pending_on_cold_boot is False
 
@@ -54,25 +52,12 @@ async def test_fork_default_preserves_queue_on_cold_boot():
 
 @pytest.mark.asyncio
 async def test_cold_boot_drops_queue_when_opted_in():
-    """extra.drop_pending_on_cold_boot=true (upstream's default): cold boot drops, reconnect preserves."""
+    """extra.drop_pending_on_cold_boot=true: cold boot drops, reconnect still preserves."""
     adapter = _make_adapter(extra={"drop_pending_on_cold_boot": True})
     assert adapter._drop_pending_on_cold_boot is True
 
     cold = await _capture_drop_pending(adapter, is_reconnect=False)
     assert cold["drop_pending_updates"] is True
-
-    warm = await _capture_drop_pending(adapter, is_reconnect=True)
-    assert warm["drop_pending_updates"] is False
-
-
-@pytest.mark.asyncio
-async def test_cold_boot_preserves_queue_when_opted_out():
-    """extra.drop_pending_on_cold_boot=false: cold boot preserves the backlog."""
-    adapter = _make_adapter(extra={"drop_pending_on_cold_boot": False})
-    assert adapter._drop_pending_on_cold_boot is False
-
-    cold = await _capture_drop_pending(adapter, is_reconnect=False)
-    assert cold["drop_pending_updates"] is False
 
     warm = await _capture_drop_pending(adapter, is_reconnect=True)
     assert warm["drop_pending_updates"] is False
