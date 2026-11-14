@@ -26,6 +26,12 @@ URL = "https://example.invalid/acme/demo.git"
 
 
 @pytest.fixture(autouse=True)
+def _fork_opt_in(monkeypatch):
+    """Fork: default installs are off unless opted in (tests/hermes_cli/test_default_plugins_fork_off.py)."""
+    monkeypatch.setenv("HERMES_FORK_ALLOW_DEFAULT_PLUGINS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _offline_pm(plugin_world):
     (plugin_world.home / "config.yaml").unlink()
 

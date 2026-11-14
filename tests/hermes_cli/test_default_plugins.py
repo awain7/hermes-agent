@@ -15,6 +15,12 @@ from hermes_cli import default_plugins
 from hermes_cli.plugin_catalog import entry_from_mapping
 
 
+@pytest.fixture(autouse=True)
+def _fork_opt_in(monkeypatch):
+    """Fork: default installs are off unless opted in (tests/hermes_cli/test_default_plugins_fork_off.py)."""
+    monkeypatch.setenv("HERMES_FORK_ALLOW_DEFAULT_PLUGINS", "1")
+
+
 def _entry(name: str, tier: str = "official"):
     return entry_from_mapping({"name": name, "repo": "https://github.com/NousResearch/hermes-official-plugins",
                                "sha": "a" * 40, "description": "d", "maintainer": "NousResearch", "tier": tier,

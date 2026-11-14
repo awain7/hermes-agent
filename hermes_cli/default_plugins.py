@@ -125,6 +125,11 @@ def fetch_policy(home: Path) -> str:
     profile: a whole-profile bind at boot would freeze the launch environment before boot sets it up."""
     if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS", "").strip().lower() in ("1", "true", "yes"):
         return "denied"
+    # Fork: this host also runs real-money trading bots, so catalog defaults never install unattended
+    # (they come with their dependencies and enabled tools, which agent.disabled_toolsets does not cover).
+    # HERMES_FORK_ALLOW_DEFAULT_PLUGINS=1 opts back in; `hermes plugins install` is unaffected.
+    if os.environ.get("HERMES_FORK_ALLOW_DEFAULT_PLUGINS", "").strip() != "1":
+        return "denied"
     from gateway.config_loader import read_yaml_layers
     try:
         security = read_yaml_layers(home).get("security")
