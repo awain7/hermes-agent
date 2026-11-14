@@ -111,6 +111,9 @@ jobs:
         tests/gateway/test_channel_directory_profile_copies.py
         tests/hermes_cli/test_dashboard_procs_cim_fallback.py
         tests/hermes_cli/test_send_list_profile_view.py
+        tests/hermes_cli/test_default_plugins.py
+        tests/hermes_cli/test_default_plugins_fork_off.py
+        tests/hermes_cli/test_plugin_install_inspected_sha_catalog.py
         tests/plugins/test_telegram_stale_pending_admission.py
         tests/plugins/test_telegram_update_admission.py
     steps:
