@@ -101,7 +101,7 @@ class GatewayBackgroundMixin:
                     provider_require_parameters=pr.get("require_parameters", False),
                     provider_data_collection=pr.get("data_collection"),
                     session_id=task_id,
-                    platform=platform_key,
+                    platform=platform_key, side_agent=True,
                     # Multiplex profile stamp (fork), for parity with the main-turn site. Hygiene, not a
                     # live fix: /bg mints a fresh session_id and passes no history, so the stored-prompt
                     # guard never runs here -- but the guard skips its check when the READER is unstamped.
@@ -109,7 +109,7 @@ class GatewayBackgroundMixin:
                     **{k: getattr(source, k) for k in (
                         "user_id", "user_id_alt", "user_name", "chat_id", "chat_name", "chat_type", "thread_id",
                     )},
-                    session_db=getattr(self._session_db, "_db", self._session_db),
+                    persistence=getattr(self, "persistence", None),
                     # Reload from disk — do not reuse the startup snapshot.
                     # See #60955.
                     fallback_model=self._refresh_fallback_model(),
